@@ -249,7 +249,7 @@ impl<'a> Search<'a> {
 
         // consume context and located_query_terms to build MatchingWords.
         let matching_words = match located_query_terms {
-            Some(located_query_terms) => MatchingWords::new(ctx, located_query_terms),
+            Some(located_query_terms) => MatchingWords::new(ctx, &located_query_terms),
             None => MatchingWords::default(),
         };
 

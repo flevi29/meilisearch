@@ -38,6 +38,8 @@ pub use federated::{perform_federated_search, FederatedSearch, Federation, Feder
 
 mod ranking_rules;
 
+// TODO: Adapt this type to support cropping
+// { "_matchesPosition": { "overview": { first: false, highlighted: [[0,4,6,11,5,234,6,241,5]] } } }
 type MatchesPosition = BTreeMap<String, Vec<MatchBounds>>;
 
 pub const DEFAULT_SEARCH_OFFSET: fn() -> usize = || 0;
@@ -631,8 +633,8 @@ impl From<FacetValuesSort> for OrderBy {
 pub struct SearchHit {
     #[serde(flatten)]
     pub document: Document,
-    #[serde(rename = "_formatted", skip_serializing_if = "Document::is_empty")]
-    pub formatted: Document,
+    #[serde(rename = "_formatted", skip_serializing_if = "Option::is_none")]
+    pub formatted: Option<Document>,
     #[serde(rename = "_matchesPosition", skip_serializing_if = "Option::is_none")]
     pub matches_position: Option<MatchesPosition>,
     #[serde(rename = "_rankingScore", skip_serializing_if = "Option::is_none")]
@@ -1712,7 +1714,7 @@ fn make_document(
 fn format_fields(
     document: &Document,
     field_ids_map: &FieldsIdsMap,
-    builder: &MatcherBuilder<'_>,
+    matcher_builder: &MatcherBuilder<'_>,
     formatted_options: &BTreeMap<FieldId, FormatOptions>,
     compute_matches: bool,
     displayable_ids: &BTreeSet<FieldId>,
@@ -1741,7 +1743,7 @@ fn format_fields(
         // Warn: The time to compute the format list scales with the number of fields to format;
         // cumulated with map_leaf_values that iterates over all the nested fields, it gives a quadratic complexity:
         // d*f where d is the total number of fields to display and f is the total number of fields to format.
-        let format = formatting_fields_options
+        let format_options = formatting_fields_options
             .iter()
             .filter(|(name, _option)| {
                 milli::is_faceted_by(name, key) || milli::is_faceted_by(key, name)
@@ -1758,10 +1760,11 @@ fn format_fields(
                 .map(LocalizedAttributesRule::locales)
         });
 
+        // TODO: At this point we need to somehow decide whether `_formatted` or `matches_position`
         *value = format_value(
             std::mem::take(value),
-            builder,
-            format,
+            matcher_builder,
+            format_options,
             &mut infos,
             compute_matches,
             locales,
@@ -1796,13 +1799,13 @@ fn format_value(
         Value::String(old_string) => {
             let mut matcher = builder.build(&old_string, locales);
             if compute_matches {
-                let matches = matcher.matches();
+                let matches = matcher.get_match_bounds();
                 infos.extend_from_slice(&matches[..]);
             }
 
             match format_options {
                 Some(format_options) => {
-                    let value = matcher.format(format_options);
+                    let value = matcher.get_formatted_text(format_options);
                     Value::String(value.into_owned())
                 }
                 None => Value::String(old_string),
@@ -1852,13 +1855,13 @@ fn format_value(
 
             let mut matcher = builder.build(&s, locales);
             if compute_matches {
-                let matches = matcher.matches();
+                let matches = matcher.get_match_bounds();
                 infos.extend_from_slice(&matches[..]);
             }
 
             match format_options {
                 Some(format_options) => {
-                    let value = matcher.format(format_options);
+                    let value = matcher.get_formatted_text(format_options);
                     Value::String(value.into_owned())
                 }
                 None => Value::String(s),
