@@ -3,13 +3,15 @@ mod best_match_interval;
 
 use std::cmp::{max, min};
 
+use super::r#match::{Match, MatchPosition};
+
 use adjust_indexes::{
     get_adjusted_index_forward_for_crop_size, get_adjusted_indexes_for_highlights_and_crop_size,
 };
 use charabia::Token;
 use serde::Serialize;
 
-use super::{FormatOptions, Match, MatchPosition};
+use super::FormatOptions;
 
 #[derive(Serialize, Debug, Clone, PartialEq, Eq)]
 #[serde(tag = "type", rename_all = "camelCase")]
@@ -23,22 +25,18 @@ pub struct MatchBoundsHelper<'a> {
     matches: &'a [Match],
 }
 
-impl<'a> MatchBoundsHelper<'a> {
-    fn get_match_byte_positions(&self, index: usize) -> [usize; 2] {
-        // TODO: This is additional work done, charabia::token::Token byte_len
-        // should already get us the original byte length, however, that doesn't work as
-        // it's supposed to, investigate why
-        let m = &self.matches[index];
-        match m.position {
-            MatchPosition::Word { token_position, .. } => {
-                let byte_start = self.tokens[token_position].byte_start;
-                [byte_start, byte_start + m.byte_len - 1]
+impl MatchBoundsHelper<'_> {
+    fn get_match_byte_position_range(&self, index: usize) -> [usize; 2] {
+        let r#match = &self.matches[index];
+
+        let byte_start = match r#match.position {
+            MatchPosition::Word { token_position, .. } => self.tokens[token_position].byte_start,
+            MatchPosition::Phrase { token_position_range: [ftp, ..], .. } => {
+                self.tokens[ftp].byte_start
             }
-            MatchPosition::Phrase { token_positions: [ftp, ..], .. } => {
-                let first_m_byte_start = self.tokens[ftp].byte_start;
-                [first_m_byte_start, first_m_byte_start + m.byte_len - 1]
-            }
-        }
+        };
+
+        [byte_start, byte_start + r#match.byte_len - 1]
     }
 
     /// TODO: Description
@@ -50,12 +48,12 @@ impl<'a> MatchBoundsHelper<'a> {
         crop_byte_end: usize,
     ) -> MatchBounds {
         let [first_match_first_byte, first_match_last_byte] =
-            self.get_match_byte_positions(matches_first_index);
+            self.get_match_byte_position_range(matches_first_index);
         let first_match_first_byte = max(first_match_first_byte, crop_byte_start);
 
         let [last_match_first_byte, last_match_last_byte] =
             if matches_first_index != matches_last_index {
-                self.get_match_byte_positions(matches_last_index)
+                self.get_match_byte_position_range(matches_last_index)
             } else {
                 [first_match_first_byte, first_match_last_byte]
             };
@@ -92,7 +90,7 @@ impl<'a> MatchBoundsHelper<'a> {
         if selected_matches_len > 2 {
             let mut index = matches_first_index + 1;
             while index != matches_last_index {
-                let [m_byte_start, m_byte_end] = self.get_match_byte_positions(index);
+                let [m_byte_start, m_byte_end] = self.get_match_byte_position_range(index);
 
                 indexes.push(m_byte_start);
                 indexes.push(m_byte_end);
@@ -193,22 +191,20 @@ impl<'a> MatchBoundsHelper<'a> {
 pub fn get_match_bounds(
     tokens: &[Token],
     matches: &[Match],
-    format_options: &FormatOptions,
+    format_options: FormatOptions,
 ) -> MatchBounds {
     let mbh = MatchBoundsHelper { tokens, matches };
 
-    if let Some(crop_size) = &format_options.crop {
-        if *crop_size != 0 {
-            if matches.is_empty() {
-                return mbh.get_crop_bounds(*crop_size);
-            }
-
-            if format_options.highlight {
-                return mbh.get_crop_and_highlight_bounds(*crop_size);
-            }
-
-            return mbh.asd(*crop_size);
+    if let Some(crop_size) = format_options.crop.filter(|v| *v != 0) {
+        if matches.is_empty() {
+            return mbh.get_crop_bounds(crop_size);
         }
+
+        if format_options.highlight {
+            return mbh.get_crop_and_highlight_bounds(crop_size);
+        }
+
+        return mbh.asd(crop_size);
     }
 
     if format_options.highlight && !matches.is_empty() {

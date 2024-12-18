@@ -5,8 +5,7 @@ mod matching_words;
 use charabia::{Language, Token, Tokenizer};
 pub use match_bounds::MatchBounds;
 pub use matching_words::MatchingWords;
-use matching_words::{MatchType, PartialMatch};
-use r#match::{Match, MatchPosition};
+use r#match::Match;
 use std::borrow::Cow;
 
 const DEFAULT_CROP_MARKER: &str = "…";
@@ -53,27 +52,20 @@ impl<'m> MatcherBuilder<'m> {
         text: &'t str,
         locales: Option<&'lang [Language]>,
     ) -> Matcher<'t, 'm, '_, 'lang> {
-        let crop_marker = match &self.crop_marker {
-            Some(marker) => marker.as_str(),
-            None => DEFAULT_CROP_MARKER,
-        };
-
-        let highlight_prefix = match &self.highlight_prefix {
-            Some(marker) => marker.as_str(),
-            None => DEFAULT_HIGHLIGHT_PREFIX,
-        };
-        let highlight_suffix = match &self.highlight_suffix {
-            Some(marker) => marker.as_str(),
-            None => DEFAULT_HIGHLIGHT_SUFFIX,
-        };
         Matcher {
             text,
             matching_words: &self.matching_words,
             tokenizer: &self.tokenizer,
-            crop_marker,
-            highlight_prefix,
-            highlight_suffix,
-            matches: None,
+            crop_marker: self.crop_marker.as_ref().map_or(DEFAULT_CROP_MARKER, |v| v.as_str()),
+            highlight_prefix: self
+                .highlight_prefix
+                .as_ref()
+                .map_or(DEFAULT_HIGHLIGHT_PREFIX, |v| v.as_str()),
+            highlight_suffix: self
+                .highlight_suffix
+                .as_ref()
+                .map_or(DEFAULT_HIGHLIGHT_SUFFIX, |v| v.as_str()),
+            tokens_and_matches: None,
             locales,
         }
     }
@@ -105,125 +97,35 @@ pub struct Matcher<'t, 'tokenizer, 'b, 'lang> {
     crop_marker: &'b str,
     highlight_prefix: &'b str,
     highlight_suffix: &'b str,
-    matches: Option<(Vec<Token<'t>>, Vec<Match>)>,
+    tokens_and_matches: Option<(Vec<Token<'t>>, Vec<Match>)>,
 }
 
-impl<'t, 'tokenizer> Matcher<'t, 'tokenizer, '_, '_> {
-    /// Iterates over tokens and save any of them that matches the query.
-    fn compute_matches(&mut self) -> &mut Self {
-        /// some words are counted as matches only if they are close together and in the good order,
-        /// compute_partial_match peek into next words to validate if the match is complete.
-        fn compute_partial_match<'a>(
-            mut partial: PartialMatch<'a>,
-            first_token_position: usize,
-            first_word_position: usize,
-            words_positions: &mut impl Iterator<Item = (usize, usize, &'a Token<'a>)>,
-            matches: &mut Vec<Match>,
-        ) -> bool {
-            for (token_position, word_position, token) in words_positions {
-                partial = match partial.match_token(token) {
-                    // token matches the partial match, but the match is not full,
-                    // we temporarily save the current token then we try to match the next one.
-                    Some(MatchType::Partial(partial)) => partial,
-                    // partial match is now full, we keep this matches and we advance positions
-                    Some(MatchType::Complete { details, ids }) => {
-                        // save the token that closes the partial match as a match.
-                        matches.push(Match {
-                            details,
-                            ids,
-                            position: MatchPosition::Phrase {
-                                word_positions: [first_word_position, word_position],
-                                token_positions: [first_token_position, token_position],
-                            },
-                        });
-
-                        // the match is complete, we return true.
-                        return true;
-                    }
-                    // no match, continue to next match.
-                    None => break,
-                };
-            }
-
-            // the match is not complete, we return false.
-            false
-        }
-
-        let tokens: Vec<_> =
-            self.tokenizer.tokenize_with_allow_list(self.text, self.locales).collect();
-        let mut matches = Vec::new();
-
-        let mut words_positions = tokens
-            .iter()
-            .scan((0, 0), |(token_position, word_position), token| {
-                let current_token_position = *token_position;
-                let current_word_position = *word_position;
-                *token_position += 1;
-                if !token.is_separator() {
-                    *word_position += 1;
-                }
-
-                Some((current_token_position, current_word_position, token))
-            })
-            .filter(|(_, _, token)| !token.is_separator());
-
-        while let Some((token_position, word_position, word)) = words_positions.next() {
-            for match_type in self.matching_words.match_token(word) {
-                match match_type {
-                    // we match, we save the current token as a match,
-                    // then we continue the rest of the tokens.
-                    MatchType::Complete { details, ids } => {
-                        matches.push(Match {
-                            details,
-                            ids,
-                            position: MatchPosition::Word { word_position, token_position },
-                        });
-                        break;
-                    }
-                    // we match partially, iterate over next tokens to check if we can complete the match.
-                    MatchType::Partial(partial) => {
-                        // if match is completed, we break the matching loop over the current token,
-                        // then we continue the rest of the tokens.
-                        let mut wp = words_positions.clone();
-                        if compute_partial_match(
-                            partial,
-                            token_position,
-                            word_position,
-                            &mut wp,
-                            &mut matches,
-                        ) {
-                            words_positions = wp;
-                            break;
-                        }
-                    }
-                }
-            }
-        }
-
-        self.matches = Some((tokens, matches));
-        self
-    }
-
+impl<'t> Matcher<'t, '_, '_, '_> {
     /// TODO: description
     pub fn get_match_bounds(&mut self, format_options: FormatOptions) -> MatchBounds {
         if self.text.is_empty() {
             return MatchBounds::Full;
         }
 
-        let (tokens, matches) = match &self.matches {
-            Some(v) => v,
-            None => {
-                return self.compute_matches().get_match_bounds(format_options);
-            }
-        };
+        let (tokens, matches) = self.tokens_and_matches.get_or_insert_with(|| {
+            // lazily get tokens and compute matches
+            let tokens = self
+                .tokenizer
+                .tokenize_with_allow_list(self.text, self.locales)
+                .collect::<Vec<_>>();
 
-        match_bounds::get_match_bounds(tokens, matches, &format_options)
+            let matches = self.matching_words.get_matches(&tokens);
+
+            (tokens, matches)
+        });
+
+        match_bounds::get_match_bounds(tokens, matches, format_options)
     }
 
     // Returns the formatted version of the original text.
     pub fn get_formatted_text(&mut self, format_options: FormatOptions) -> Cow<'t, str> {
         if !format_options.highlight && format_options.crop.is_none() {
-            // compute matches is not needed if no highlight nor crop is requested.
+            // compute matches is not needed if no highlight nor crop is requested
             return Cow::Borrowed(self.text);
         }
 
@@ -240,7 +142,7 @@ impl<'t, 'tokenizer> Matcher<'t, 'tokenizer, '_, '_> {
         let mut previous_index = &indexes[0];
         let indexes_iter = indexes.iter().skip(1);
 
-        // push crop marker if it's not the start of the text.
+        // push crop marker if it's not the start of the text
         if !self.crop_marker.is_empty() && *previous_index != 0 {
             formatted.push(self.crop_marker);
         }
@@ -260,7 +162,7 @@ impl<'t, 'tokenizer> Matcher<'t, 'tokenizer, '_, '_> {
             previous_index = index;
         }
 
-        // push crop marker if it's not the end of the text.
+        // push crop marker if it's not the end of the text
         if !self.crop_marker.is_empty() && *previous_index < self.text.len() {
             formatted.push(self.crop_marker);
         }

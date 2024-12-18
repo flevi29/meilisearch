@@ -1,23 +1,56 @@
 use std::cmp::Reverse;
-use std::fmt;
+use std::fmt::Debug;
 
 use charabia::Token;
 
 use super::super::interner::Interned;
 use super::super::query_term::LocatedQueryTerm;
 use super::super::{DedupInterner, Phrase};
+use super::r#match::{Match, MatchPosition};
 use crate::SearchContext;
 
-pub struct LocatedMatchingPhrase {
-    pub value: Interned<Phrase>,
-    pub positions: [WordId; 2],
+// TODO: Consider using a tuple here, because indexing this thing out of bounds only incurs a runtime error
+pub type UserQueryPositionRange = [u16; 2];
+
+struct LocatedMatchingPhrase {
+    value: Interned<Phrase>,
+    position: UserQueryPositionRange,
 }
 
-pub struct LocatedMatchingWords {
-    pub value: Vec<Interned<String>>,
-    pub positions: [WordId; 2],
-    pub is_prefix: bool,
-    pub original_char_count: usize,
+struct LocatedMatchingWords {
+    value: Vec<Interned<String>>,
+    position: UserQueryPositionRange,
+    is_prefix: bool,
+    original_char_count: usize,
+}
+
+struct TokenPositionHelper<'a> {
+    token: &'a Token<'a>,
+    position_by_word: usize,
+    position_by_token: usize,
+}
+
+impl<'a> TokenPositionHelper<'a> {
+    fn iter_from_tokens(tokens: &'a [Token]) -> impl Iterator<Item = Self> + Clone {
+        tokens
+            .iter()
+            .scan([0, 0], |[token_position, word_position], token| {
+                let token_word_thingy = Self {
+                    position_by_token: *token_position,
+                    position_by_word: *word_position,
+                    token,
+                };
+
+                *token_position += 1;
+
+                if !token.is_separator() {
+                    *word_position += 1;
+                }
+
+                Some(token_word_thingy)
+            })
+            .filter(|t| !t.token.is_separator())
+    }
 }
 
 /// Structure created from a query tree
@@ -26,14 +59,14 @@ pub struct LocatedMatchingWords {
 pub struct MatchingWords {
     word_interner: DedupInterner<String>,
     phrase_interner: DedupInterner<Phrase>,
-    phrases: Vec<LocatedMatchingPhrase>,
-    words: Vec<LocatedMatchingWords>,
+    located_matching_phrases: Vec<LocatedMatchingPhrase>,
+    located_matching_words: Vec<LocatedMatchingWords>,
 }
 
 impl MatchingWords {
     pub fn new(ctx: SearchContext, located_terms: &[LocatedQueryTerm]) -> Self {
-        let mut phrases = Vec::new();
-        let mut words = Vec::new();
+        let mut located_matching_phrases = Vec::new();
+        let mut located_matching_words = Vec::new();
 
         // Extract and centralize the different phrases and words to match stored in a QueryTerm
         // and wrap them in dedicated structures.
@@ -41,177 +74,205 @@ impl MatchingWords {
             let term = ctx.term_interner.get(*value);
             let (matching_words, matching_phrases) = term.all_computed_derivations();
 
-            for matching_phrase in matching_phrases {
-                phrases.push(LocatedMatchingPhrase {
-                    value: matching_phrase,
-                    positions: [*positions.start(), *positions.end()],
-                });
-            }
+            let position = [*positions.start(), *positions.end()];
 
-            words.push(LocatedMatchingWords {
+            located_matching_phrases.reserve(matching_phrases.len());
+            located_matching_phrases.extend(matching_phrases.iter().map(|matching_phrase| {
+                LocatedMatchingPhrase { value: *matching_phrase, position }
+            }));
+
+            located_matching_words.push(LocatedMatchingWords {
                 value: matching_words,
-                positions: [*positions.start(), *positions.end()],
+                position,
                 is_prefix: term.is_prefix(),
                 original_char_count: term.original_word(&ctx).chars().count(),
             });
         }
 
-        // Sort word to put prefixes at the bottom prioritizing the exact matches.
-        words.sort_unstable_by_key(|lmw| (lmw.is_prefix, Reverse(lmw.positions.len())));
+        // Sort words by having `is_prefix` as false first and then by their lengths in reverse order.
+        // This is only meant to help with what we match a token against first.
+        located_matching_words.sort_unstable_by_key(|lmw| {
+            (lmw.is_prefix, Reverse(lmw.position[1] - lmw.position[0]))
+        });
 
         Self {
-            phrases,
-            words,
+            located_matching_phrases,
+            located_matching_words,
             word_interner: ctx.word_interner,
             phrase_interner: ctx.phrase_interner,
         }
     }
 
-    /// Returns an iterator over terms that match or partially match the given token.
-    pub fn match_token<'a, 'b>(&'a self, token: &'b Token<'b>) -> MatchesIter<'a, 'b> {
-        MatchesIter { matching_words: self, index: 0, phrases: &self.phrases, token }
+    fn try_get_phrase_match<'a>(
+        &self,
+        token_position_helper_iter: &mut (impl Iterator<Item = TokenPositionHelper<'a>> + Clone),
+    ) -> Option<Match> {
+        let mut mapped_phrase_iter = self.located_matching_phrases.iter().map(|lmp| {
+            let words_iter = self
+                .phrase_interner
+                .get(lmp.value)
+                .words
+                .iter()
+                .map(|word_option| word_option.map(|word| self.word_interner.get(word).as_str()))
+                .peekable();
+
+            (lmp.position, words_iter)
+        });
+
+        'outer: loop {
+            let Some((query_position, mut words_iter)) = mapped_phrase_iter.next() else {
+                return None;
+            };
+
+            // TODO: Is it worth only cloning if we have to?
+            let mut tph_iter = token_position_helper_iter.clone();
+
+            let mut first_tph_details = None;
+            let last_tph_details = loop {
+                // 1. get word from `words_iter` and token word thingy from `token_word_thingy_iter`
+                let (Some(word), Some(tph)) = (words_iter.next(), tph_iter.next()) else {
+                    // 2. if there are no more words or token word thingys, get to next phrase and reset `token_word_thingy_iter`
+                    continue 'outer;
+                };
+
+                // ?. save first token position bla bla bla
+                if first_tph_details.is_none() {
+                    first_tph_details = Some([
+                        tph.position_by_token,
+                        tph.position_by_word,
+                        tph.token.char_start,
+                        tph.token.byte_start,
+                    ]);
+                }
+
+                // 3. check if word matches our token
+                let is_matching = match word {
+                    Some(word) => tph.token.lemma() == word,
+                    // a `None` value in the phrase words iterator corresponds to a stop word,
+                    // the value is considered a match if the current token is categorized as a stop word.
+                    None => tph.token.is_stopword(),
+                };
+
+                // 4. if it does not, get to next phrase and restart `token_word_thingy_iter`
+                if !is_matching {
+                    continue 'outer;
+                }
+
+                // 5. if it does, and there are no words left, time to return
+                if words_iter.peek().is_none() {
+                    break [
+                        tph.position_by_token,
+                        tph.position_by_word,
+                        tph.token.char_end,
+                        tph.token.byte_end,
+                    ];
+                }
+            };
+
+            let Some(
+                [first_tph_position_by_token, first_tph_position_by_word, first_tph_char_start, first_tph_byte_start],
+            ) = first_tph_details
+            else {
+                panic!("TODO");
+            };
+            let [last_tph_position_by_token, last_tph_position_by_word, last_tph_char_end, last_tph_byte_end] =
+                last_tph_details;
+
+            *token_position_helper_iter = tph_iter;
+
+            return Some(Match::Phrase {
+                byte_len: last_tph_byte_end - first_tph_byte_start + 1,
+                char_count: last_tph_char_end - first_tph_char_start + 1,
+                word_position_range: [first_tph_position_by_word, last_tph_position_by_word],
+                token_position_range: [first_tph_position_by_token, last_tph_position_by_token],
+                query_position_range: query_position,
+            });
+        }
     }
 
     /// Try to match the token with one of the located_words.
-    fn match_unique_words(&self, token: &Token) -> Option<MatchType> {
-        for located_words in &self.words {
-            for word in &located_words.value {
-                let word = self.word_interner.get(*word);
-                // if the word is a prefix we match using starts_with.
-                if located_words.is_prefix && token.lemma().starts_with(word) {
-                    let Some((char_index, c)) =
-                        word.char_indices().take(located_words.original_char_count).last()
+    fn try_get_word_match(&self, tph: TokenPositionHelper) -> Option<Match> {
+        let mut iter =
+            self.located_matching_words.iter().flat_map(|lw| lw.value.iter().map(move |w| (lw, w)));
+
+        loop {
+            let (located_words, word) = iter.next()?;
+            let word = self.word_interner.get(*word);
+
+            let [char_count, byte_len] =
+                if located_words.is_prefix && tph.token.lemma().starts_with(word) {
+                    // TODO: Isn't there something on [Token] already for this, or something that makes this simpler?
+                    // if the word is a prefix we match using starts_with
+                    let Some(prefix_byte_len) = word
+                        .char_indices()
+                        .nth(located_words.original_char_count - 1)
+                        .map(|(char_index, c)| char_index + c.len_utf8())
                     else {
                         continue;
                     };
-                    let prefix_length = char_index + c.len_utf8();
-                    return Some(MatchType::Complete {
-                        details: CompleteMatch::Prefix { prefix_length },
-                        ids: located_words.positions,
-                    });
-                // else we exact match the token.
-                } else if token.lemma() == word {
-                    return Some(MatchType::Complete {
-                        details: CompleteMatch::Full {
-                            char_count: token.char_end - token.char_start + 1,
-                            byte_len: token.byte_end - token.byte_start + 1,
-                        },
-                        ids: located_words.positions,
-                    });
-                }
-            }
-        }
 
-        None
-    }
-}
+                    [located_words.original_char_count, prefix_byte_len]
+                } else if tph.token.lemma() == word {
+                    // else if we exact, match the token
+                    [
+                        tph.token.char_end - tph.token.char_start + 1,
+                        tph.token.byte_end - tph.token.byte_start + 1,
+                    ]
+                } else {
+                    continue;
+                };
 
-/// Iterator over terms that match the given token,
-/// This allow to lazily evaluate matches.
-/// TODO: Are 2 lifetimes necessary?
-pub struct MatchesIter<'a, 'b> {
-    matching_words: &'a MatchingWords,
-    index: usize,
-    phrases: &'a [LocatedMatchingPhrase],
-    token: &'b Token<'b>,
-}
-
-impl<'a> Iterator for MatchesIter<'a, '_> {
-    type Item = MatchType<'a>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        if self.index >= self.phrases.len() - 1 {
-            // If no phrases matches, try to match uiques words.
-            return self.matching_words.match_unique_words(self.token);
-        }
-
-        // Try to match all the phrases first.
-        let located_phrase = &self.phrases[self.index];
-        self.index += 1;
-
-        let phrase = self.matching_words.phrase_interner.get(located_phrase.value);
-
-        // create a PartialMatch struct to make it compute the first match
-        // instead of duplicating the code.
-        // collect the references of words from the interner.
-        let words = phrase
-            .words
-            .iter()
-            .map(|word| word.map(|word| self.matching_words.word_interner.get(word).as_str()))
-            .collect();
-        let partial = PartialMatch { matching_words: words, ids: located_phrase.positions };
-
-        partial.match_token(self.token).or_else(|| self.next())
-    }
-}
-
-/// Id of a matching term corespounding to a word written by the end user.
-pub type WordId = u16;
-
-#[derive(Debug, PartialEq)]
-pub enum CompleteMatch {
-    Full { char_count: usize, byte_len: usize },
-    Prefix { prefix_length: usize },
-}
-
-/// A given token can partially match a query word for several reasons:
-/// - split words
-/// - multi-word synonyms
-/// In these cases we need to match consecutively several tokens to consider that the match is full.
-#[derive(Debug, PartialEq)]
-pub enum MatchType<'a> {
-    Complete { details: CompleteMatch, ids: [WordId; 2] },
-    Partial(PartialMatch<'a>),
-}
-
-/// Structure helper to match several tokens in a row in order to complete a partial match.
-#[derive(Debug, PartialEq)]
-pub struct PartialMatch<'a> {
-    index: usize,
-    matching_words: &'a [Option<&'a str>],
-    ids: [WordId; 2],
-}
-
-// TODO: There must be a better way to do this whole thing,
-// this could also count words in-place, set porper indexes, no need for separate Match struct perhaps
-impl<'a> PartialMatch<'a> {
-    /// Returns:
-    /// - None if the given token breaks the partial match
-    /// - Partial if the given token matches the partial match but doesn't complete it
-    /// - Full if the given token completes the partial match
-    pub fn match_token(mut self, token: &Token) -> Option<MatchType<'a>> {
-        let is_matching = match self.matching_words.get(self.index)? {
-            Some(word) => &token.lemma() == word,
-            // a None value in the phrase corresponds to a stop word,
-            // the walue is considered a match if the current token is categorized as a stop word.
-            None => token.is_stopword(),
-        };
-
-        // if there are remaining words to match in the phrase and the current token is matching,
-        // return a new Partial match allowing the highlighter to continue.
-        if is_matching && self.index < self.matching_words.len() - 1 {
-            self.index += 1;
-            Some(MatchType::Partial(self))
-        // if there is no remaining word to match in the phrase and the current token is matching,
-        // return a Full match.
-        } else if is_matching {
-            Some(MatchType::Complete {
-                details: CompleteMatch::Full {
-                    char_count: token.char_end - token.char_start + 1,
-                    byte_len: token.byte_end - token.byte_start + 1,
+            return Some(Match {
+                char_count,
+                byte_len,
+                position: MatchPosition::Word {
+                    word_position: tph.position_by_word,
+                    token_position: tph.position_by_token,
                 },
-                ids: self.ids,
-            })
-        // if the current token doesn't match, return None to break the match sequence.
-        } else {
-            None
+                query_position_range: located_words.position,
+            });
         }
+    }
+
+    pub fn get_matches(&self, tokens: &[Token]) -> Vec<Match> {
+        let mut token_position_helper_iter = TokenPositionHelper::iter_from_tokens(tokens);
+        let mut matches = Vec::new();
+
+        loop {
+            // try and get a phrase match
+            if let Some(r#match) = self.try_get_phrase_match(&mut token_position_helper_iter) {
+                matches.push(r#match);
+
+                continue;
+            }
+
+            // if the above fails, try get next token position helper
+            if let Some(tph) = token_position_helper_iter.next() {
+                // and then try and get a word match
+                if let Some(r#match) = self.try_get_word_match(tph) {
+                    matches.push(r#match);
+                }
+            } else {
+                // there are no more items in the iterator, we are done searching for matches
+                break;
+            };
+        }
+
+        // TODO: Explain why
+        matches.sort_unstable_by(|a, b| a.query_position_range[0].cmp(&b.query_position_range[0]));
+
+        matches
     }
 }
 
-impl fmt::Debug for MatchingWords {
+impl Debug for MatchingWords {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let MatchingWords { word_interner, phrase_interner, phrases, words } = self;
+        let MatchingWords {
+            word_interner,
+            phrase_interner,
+            located_matching_phrases: phrases,
+            located_matching_words: words,
+        } = self;
 
         let phrases: Vec<_> = phrases
             .iter()
@@ -224,7 +285,7 @@ impl fmt::Debug for MatchingWords {
                         .map(|w| w.map_or("STOP_WORD", |w| word_interner.get(w)))
                         .collect::<Vec<_>>()
                         .join(" "),
-                    p.positions.clone(),
+                    p.position.clone(),
                 )
             })
             .collect();
@@ -234,7 +295,7 @@ impl fmt::Debug for MatchingWords {
             .flat_map(|w| {
                 w.value
                     .iter()
-                    .map(|s| (word_interner.get(*s), w.positions.clone(), w.is_prefix))
+                    .map(|s| (word_interner.get(*s), w.position.clone(), w.is_prefix))
                     .collect::<Vec<_>>()
             })
             .collect();
@@ -290,7 +351,7 @@ pub(crate) mod tests {
                 .next(),
             Some(MatchType::Complete {
                 details: CompleteMatch::Full { char_count: 5, byte_len: 5 },
-                ids: [0, 0]
+                position: [0, 0]
             })
         );
         assert_eq!(
@@ -317,7 +378,7 @@ pub(crate) mod tests {
                 .next(),
             Some(MatchType::Complete {
                 details: CompleteMatch::Full { char_count: 5, byte_len: 5 },
-                ids: [2, 2]
+                position: [2, 2]
             })
         );
         assert_eq!(
@@ -332,7 +393,7 @@ pub(crate) mod tests {
                 .next(),
             Some(MatchType::Complete {
                 details: CompleteMatch::Full { char_count: 5, byte_len: 5 },
-                ids: [2, 2]
+                position: [2, 2]
             })
         );
         assert_eq!(

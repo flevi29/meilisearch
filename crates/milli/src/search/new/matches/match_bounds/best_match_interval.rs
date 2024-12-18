@@ -1,113 +1,95 @@
-use super::super::matching_words::WordId;
-use super::super::{Match, MatchPosition};
+use std::cell::Cell;
 
-struct MatchIntervalWithScore {
-    interval: [usize; 2],
+use super::super::matching_words::UserQueryPositionRange;
+use super::super::Match;
+
+struct MatchesIndexRangeWithScore {
+    matches_index_range: [usize; 2],
     score: [i16; 3],
-}
-
-// count score for phrases
-fn tally_phrase_scores(fwp: usize, lwp: usize, order_score: &mut i16, distance_score: &mut i16) {
-    let words_in_phrase_minus_one = (lwp - fwp) as i16;
-    // will always be ordered, so +1 for each space between words
-    *order_score += words_in_phrase_minus_one;
-    // distance will always be 1, so -1 for each space between words
-    *distance_score -= words_in_phrase_minus_one;
-}
-
-// TODO: If matches are ordered, this can only ever grow right
-// UPDATE: they're not necessarily ordered; first come phrases, then words, then prefix word matches
-// QUESTION: does this order even matter where it's defined? Should we get rid of it?
-enum Changed {
-    Left,
-    Right
 }
 
 /// Compute the score of a match interval:
 /// 1) count unique matches
 /// 2) calculate distance between matches
 /// 3) count ordered matches
-fn get_interval_score(matches: &[Match]) -> [i16; 3] {
-    let mut ids: Vec<[WordId; 2]> = Vec::with_capacity(matches.len());
-    let mut order_score = 0;
-    let mut distance_score = 0;
+fn get_score(matches: &[Match]) -> [i16; 3] {
+    let mut uniqueness_score = 0i16;
+    let mut current_range: Option<UserQueryPositionRange> = None;
+    // matches are always ordered, so +1 for each match
+    let order_score = Cell::new(matches.len() as i16);
+    let distance_score = Cell::new(0);
+
+    // count score for phrases
+    let tally_phrase_scores = |fwp, lwp| {
+        let words_in_phrase_minus_one = (lwp - fwp) as i16;
+        // will always be ordered, so +1 for each space between words
+        order_score.set(order_score.get() + words_in_phrase_minus_one);
+        // distance will always be 1, so -1 for each space between words
+        distance_score.set(distance_score.get() - words_in_phrase_minus_one);
+    };
 
     let mut iter = matches.iter().peekable();
-    while let Some(m) = iter.next() {
-        let [m_id_first, m_id_last] = m.ids;
-
+    while let Some(r#match) = iter.next() {
         if let Some(next_match) = iter.peek() {
-            let [n_m_id_first, n_m_id_last] = next_match.ids;
-            // if matches are ordered
-            if n_m_id_first > m_id_first {
-                order_score += 1;
-            }
-
-            let m_last_word_pos = match m.position {
-                MatchPosition::Word { word_position, .. } => word_position,
-                MatchPosition::Phrase { word_positions: [fwp, lwp], .. } => {
-                    tally_phrase_scores(fwp, lwp, &mut order_score, &mut distance_score);
+            let match_last_word_pos = match *r#match {
+                Match::Word { word_position, .. } => word_position,
+                Match::Phrase { word_position_range: [fwp, lwp], .. } => {
+                    tally_phrase_scores(fwp, lwp);
                     lwp
                 }
             };
             let next_match_first_word_pos = next_match.get_first_word_pos();
 
             // compute distance between matches
-            distance_score -= (next_match_first_word_pos - m_last_word_pos).min(7) as i16;
-        } else if let MatchPosition::Phrase { word_positions: [fwp, lwp], .. } = m.position {
+            distance_score.set(
+                distance_score.get()
+                    - (next_match_first_word_pos - match_last_word_pos).min(7) as i16,
+            );
+        } else if let Match::Phrase { word_position_range: [fwp, lwp], .. } = *r#match {
             // in case last match is a phrase, count score for its words
-            tally_phrase_scores(fwp, lwp, &mut order_score, &mut distance_score);
+            tally_phrase_scores(fwp, lwp);
         }
 
-        let mut changed = None;
-        let mut ind = 0;
-        while ind != ids.len() - 1 {
-            let ids_ind = &mut ids[ind];
-            let [id_first, id_last] = *ids_ind;
+        // because matches are ordered by query position, this algorithm avoids needing a vector
+        let query_position = r#match.get_query_position();
+        match current_range.as_mut() {
+            Some([saved_range_start, saved_range_end]) => {
+                let [range_start, range_end] = query_position;
 
-            if m_id_last >= id_first && m_id_first <= id_last {
-                if m_id_first < id_first {
-                    ids_ind[0] = m_id_first;
-                    changed = Some(Changed::Left);
-                }
+                if range_start > *saved_range_start {
+                    uniqueness_score += (*saved_range_end - *saved_range_start) as i16 + 1;
 
-                if m_id_last > id_last {
-                    ids_ind[1] = m_id_last;
-                    changed = Some(Changed::Right);
+                    *saved_range_start = range_start;
+                    *saved_range_end = range_end;
+                } else if range_end > *saved_range_end {
+                    *saved_range_end = range_end;
                 }
             }
-
-            // TODO: IF anything changed above in any of the directions, check if any of the other elements can be folded
-
-            ind += 1;
+            None => current_range = Some(query_position),
         }
-
-        ids.push(m.ids);
     }
 
-    ids.sort_unstable();
-    ids.dedup();
-    let unique_score = ids.len() as i16;
+    if let Some([saved_range_start, saved_range_end]) = current_range {
+        uniqueness_score += (saved_range_end - saved_range_start) as i16 + 1;
+    }
 
     // rank by unique match count, then by distance between matches, then by ordered match count.
-    [unique_score, distance_score, order_score]
+    [uniqueness_score, distance_score.into_inner(), order_score.into_inner()]
 }
 
 /// Returns the first and last match where the score computed by match_interval_score is the best.
 pub fn get_best_match_interval(matches: &[Match], crop_size: usize) -> [usize; 2] {
     // positions of the first and the last match of the best matches interval in `matches`.
-    let mut best_interval = None;
+    let mut best_matches_index_range: Option<MatchesIndexRangeWithScore> = None;
 
     let mut save_best_interval = |interval_first, interval_last| {
-        let interval_score = get_interval_score(&matches[interval_first..=interval_last]);
-        let is_interval_score_better = best_interval
-            .as_ref()
-            .map_or(true, |MatchIntervalWithScore { score, .. }| interval_score > *score);
+        let score = get_score(&matches[interval_first..=interval_last]);
+        let is_score_better = best_matches_index_range.as_ref().map_or(true, |v| score > v.score);
 
-        if is_interval_score_better {
-            best_interval = Some(MatchIntervalWithScore {
-                interval: [interval_first, interval_last],
-                score: interval_score,
+        if is_score_better {
+            best_matches_index_range = Some(MatchesIndexRangeWithScore {
+                matches_index_range: [interval_first, interval_last],
+                score,
             });
         }
     };
@@ -161,6 +143,5 @@ pub fn get_best_match_interval(matches: &[Match], crop_size: usize) -> [usize; 2
     }
 
     // if none of the matches fit the criteria above, default to the first one
-    best_interval
-        .map_or([0, 0], |MatchIntervalWithScore { interval: [first, last], .. }| [first, last])
+    best_matches_index_range.map_or([0, 0], |v| v.matches_index_range)
 }
