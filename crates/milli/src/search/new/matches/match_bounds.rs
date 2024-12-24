@@ -1,9 +1,12 @@
 mod adjust_indexes;
-mod best_match_interval;
+mod best_match_range;
 
 use std::cmp::{max, min};
 
-use super::r#match::{Match, MatchPosition};
+use super::{
+    matching_words::QueryPosition,
+    r#match::{Match, MatchPosition},
+};
 
 use adjust_indexes::{
     get_adjusted_index_forward_for_crop_size, get_adjusted_indexes_for_highlights_and_crop_size,
@@ -17,18 +20,29 @@ use super::FormatOptions;
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum MatchBounds {
     Full,
-    Formatted { highlight_toggle: bool, indexes: Box<[usize]> },
+    Formatted { highlight_toggle: bool, indexes: Vec<usize> },
 }
 
 pub struct MatchBoundsHelper<'a> {
     tokens: &'a [Token<'a>],
     matches: &'a [Match],
+    query_positions: &'a [QueryPosition],
+}
+
+struct MatchesAndCropIndexes {
+    matches_first_index: usize,
+    matches_last_index: usize,
+    crop_byte_start: usize,
+    crop_byte_end: usize,
+}
+
+enum CropThing {
+    Last(usize),
+    First(usize),
 }
 
 impl MatchBoundsHelper<'_> {
-    fn get_match_byte_position_range(&self, index: usize) -> [usize; 2] {
-        let r#match = &self.matches[index];
-
+    fn get_match_byte_position_range(&self, r#match: &Match) -> [usize; 2] {
         let byte_start = match r#match.position {
             MatchPosition::Word { token_position, .. } => self.tokens[token_position].byte_start,
             MatchPosition::Phrase { token_position_range: [ftp, ..], .. } => {
@@ -36,24 +50,60 @@ impl MatchBoundsHelper<'_> {
             }
         };
 
-        [byte_start, byte_start + r#match.byte_len - 1]
+        [byte_start, byte_start + r#match.byte_len]
+    }
+
+    fn get_match_byte_position_rangee(
+        &self,
+        index: &mut usize,
+        crop_thing: CropThing,
+    ) -> [usize; 2] {
+        let new_index = match crop_thing {
+            CropThing::First(_) if *index != 0 => *index - 1,
+            CropThing::Last(_) if *index != self.matches.len() - 1 => *index + 1,
+            _ => {
+                return self.get_match_byte_position_range(&self.matches[*index]);
+            }
+        };
+
+        let [byte_start, byte_end] = self.get_match_byte_position_range(&self.matches[new_index]);
+
+        // NOTE: This doesn't need additional checks, because `get_best_match_index_range` already
+        // guarantees that the next or preceeding match contains the crop boundary
+        match crop_thing {
+            CropThing::First(crop_byte_start) if crop_byte_start < byte_end => {
+                *index -= 1;
+                [byte_start, byte_end]
+            }
+            CropThing::Last(crop_byte_end) if byte_start < crop_byte_end => {
+                *index += 1;
+                [byte_start, byte_end]
+            }
+            _ => self.get_match_byte_position_range(&self.matches[*index]),
+        }
     }
 
     /// TODO: Description
-    fn get_match_bounds(
-        &self,
-        matches_first_index: usize,
-        matches_last_index: usize,
-        crop_byte_start: usize,
-        crop_byte_end: usize,
-    ) -> MatchBounds {
-        let [first_match_first_byte, first_match_last_byte] =
-            self.get_match_byte_position_range(matches_first_index);
+    fn get_match_bounds(&self, mci: MatchesAndCropIndexes) -> MatchBounds {
+        let MatchesAndCropIndexes {
+            mut matches_first_index,
+            mut matches_last_index,
+            crop_byte_start,
+            crop_byte_end,
+        } = mci;
+
+        let [first_match_first_byte, first_match_last_byte] = self.get_match_byte_position_rangee(
+            &mut matches_first_index,
+            CropThing::First(crop_byte_start),
+        );
         let first_match_first_byte = max(first_match_first_byte, crop_byte_start);
 
         let [last_match_first_byte, last_match_last_byte] =
             if matches_first_index != matches_last_index {
-                self.get_match_byte_position_range(matches_last_index)
+                self.get_match_byte_position_rangee(
+                    &mut matches_last_index,
+                    CropThing::Last(crop_byte_end),
+                )
             } else {
                 [first_match_first_byte, first_match_last_byte]
             };
@@ -79,8 +129,6 @@ impl MatchBoundsHelper<'_> {
             indexes.push(crop_byte_start);
         }
 
-        // TODO: This should consider matches that are not in the index range as well
-
         indexes.push(first_match_first_byte);
 
         if selected_matches_len > 1 {
@@ -88,14 +136,12 @@ impl MatchBoundsHelper<'_> {
         }
 
         if selected_matches_len > 2 {
-            let mut index = matches_first_index + 1;
-            while index != matches_last_index {
-                let [m_byte_start, m_byte_end] = self.get_match_byte_position_range(index);
+            for index in (matches_first_index + 1)..matches_last_index {
+                let [m_byte_start, m_byte_end] =
+                    self.get_match_byte_position_range(&self.matches[index]);
 
                 indexes.push(m_byte_start);
                 indexes.push(m_byte_end);
-
-                index += 1;
             }
         }
 
@@ -111,11 +157,12 @@ impl MatchBoundsHelper<'_> {
 
         MatchBounds::Formatted {
             highlight_toggle: !crop_byte_start_is_not_first_match_start,
-            indexes: indexes.into(),
+            indexes,
         }
     }
 
-    fn get_crop_bounds(&self, crop_size: usize) -> MatchBounds {
+    /// For crop but no highlight.
+    fn get_crop_bounds_with_no_matches(&self, crop_size: usize) -> MatchBounds {
         let final_token_index = get_adjusted_index_forward_for_crop_size(self.tokens, crop_size);
         let final_token = &self.tokens[final_token_index];
         let crop_byte_end = if final_token_index != self.tokens.len() - 1 {
@@ -124,12 +171,18 @@ impl MatchBoundsHelper<'_> {
             final_token.byte_end
         };
 
-        MatchBounds::Formatted { highlight_toggle: false, indexes: Box::new([0, crop_byte_end]) }
+        MatchBounds::Formatted { highlight_toggle: false, indexes: vec![0, crop_byte_end] }
     }
 
-    fn get_crop_and_highlight_bounds_thingy(&self, crop_size: usize) -> [usize; 4] {
+    fn get_matches_and_crop_indexes(&self, crop_size: usize) -> MatchesAndCropIndexes {
+        // TODO: This doesnt give back 2 phrases if one is out of crop window
+        // Solution: also get next and previous matches, and if they're in the crop window, even if partially, highlight them
         let [matches_first_index, matches_last_index] =
-            best_match_interval::get_best_match_interval(self.matches, crop_size);
+            best_match_range::get_best_match_index_range(
+                self.matches,
+                self.query_positions,
+                crop_size,
+            );
 
         let first_match = &self.matches[matches_first_index];
         let last_match = &self.matches[matches_last_index];
@@ -160,30 +213,26 @@ impl MatchBoundsHelper<'_> {
             forward_token.byte_start
         };
 
-        [matches_first_index, matches_last_index, crop_byte_start, crop_byte_end]
-    }
-
-    /// TODO: description
-    fn get_crop_and_highlight_bounds(&self, crop_size: usize) -> MatchBounds {
-        let [matches_first_index, matches_last_index, crop_byte_start, crop_byte_end] =
-            self.get_crop_and_highlight_bounds_thingy(crop_size);
-
-        self.get_match_bounds(
+        MatchesAndCropIndexes {
             matches_first_index,
             matches_last_index,
             crop_byte_start,
             crop_byte_end,
-        )
+        }
     }
 
-    // TODO: Rename
-    fn asd(&self, crop_size: usize) -> MatchBounds {
-        let [_, _, crop_byte_start, crop_byte_end] =
-            self.get_crop_and_highlight_bounds_thingy(crop_size);
+    /// For when
+    fn get_crop_and_highlight_bounds(&self, crop_size: usize) -> MatchBounds {
+        self.get_match_bounds(self.get_matches_and_crop_indexes(crop_size))
+    }
+
+    /// For when there are no matches, but crop is required.
+    fn get_crop_bounds_with_matches(&self, crop_size: usize) -> MatchBounds {
+        let mci = self.get_matches_and_crop_indexes(crop_size);
 
         MatchBounds::Formatted {
             highlight_toggle: false,
-            indexes: Box::new([crop_byte_start, crop_byte_end]),
+            indexes: vec![mci.crop_byte_start, mci.crop_byte_end],
         }
     }
 }
@@ -191,24 +240,30 @@ impl MatchBoundsHelper<'_> {
 pub fn get_match_bounds(
     tokens: &[Token],
     matches: &[Match],
+    query_positions: &[QueryPosition],
     format_options: FormatOptions,
 ) -> MatchBounds {
-    let mbh = MatchBoundsHelper { tokens, matches };
+    let mbh = MatchBoundsHelper { tokens, matches, query_positions };
 
     if let Some(crop_size) = format_options.crop.filter(|v| *v != 0) {
         if matches.is_empty() {
-            return mbh.get_crop_bounds(crop_size);
+            return mbh.get_crop_bounds_with_no_matches(crop_size);
         }
 
         if format_options.highlight {
             return mbh.get_crop_and_highlight_bounds(crop_size);
         }
 
-        return mbh.asd(crop_size);
+        return mbh.get_crop_bounds_with_matches(crop_size);
     }
 
     if format_options.highlight && !matches.is_empty() {
-        mbh.get_match_bounds(0, matches.len() - 1, 0, tokens[tokens.len() - 1].byte_end)
+        mbh.get_match_bounds(MatchesAndCropIndexes {
+            matches_first_index: 0,
+            matches_last_index: matches.len() - 1,
+            crop_byte_start: 0,
+            crop_byte_end: tokens[tokens.len() - 1].byte_end,
+        })
     } else {
         MatchBounds::Full
     }

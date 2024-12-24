@@ -5,6 +5,7 @@ mod matching_words;
 use charabia::{Language, Token, Tokenizer};
 pub use match_bounds::MatchBounds;
 pub use matching_words::MatchingWords;
+use matching_words::QueryPosition;
 use r#match::Match;
 use std::borrow::Cow;
 
@@ -65,7 +66,7 @@ impl<'m> MatcherBuilder<'m> {
                 .highlight_suffix
                 .as_ref()
                 .map_or(DEFAULT_HIGHLIGHT_SUFFIX, |v| v.as_str()),
-            tokens_and_matches: None,
+            tokens_matches_and_query_positions: None,
             locales,
         }
     }
@@ -97,7 +98,7 @@ pub struct Matcher<'t, 'tokenizer, 'b, 'lang> {
     crop_marker: &'b str,
     highlight_prefix: &'b str,
     highlight_suffix: &'b str,
-    tokens_and_matches: Option<(Vec<Token<'t>>, Vec<Match>)>,
+    tokens_matches_and_query_positions: Option<((Vec<Match>, Vec<QueryPosition>), Vec<Token<'t>>)>,
 }
 
 impl<'t> Matcher<'t, '_, '_, '_> {
@@ -107,19 +108,18 @@ impl<'t> Matcher<'t, '_, '_, '_> {
             return MatchBounds::Full;
         }
 
-        let (tokens, matches) = self.tokens_and_matches.get_or_insert_with(|| {
-            // lazily get tokens and compute matches
-            let tokens = self
-                .tokenizer
-                .tokenize_with_allow_list(self.text, self.locales)
-                .collect::<Vec<_>>();
+        let ((matches, query_positions), tokens) =
+            self.tokens_matches_and_query_positions.get_or_insert_with(|| {
+                // lazily get tokens and compute matches and query positons
+                let tokens = self
+                    .tokenizer
+                    .tokenize_with_allow_list(self.text, self.locales)
+                    .collect::<Vec<_>>();
 
-            let matches = self.matching_words.get_matches(&tokens);
+                (self.matching_words.get_matches_and_query_positions(&tokens, self.text), tokens)
+            });
 
-            (tokens, matches)
-        });
-
-        match_bounds::get_match_bounds(tokens, matches, format_options)
+        match_bounds::get_match_bounds(tokens, matches, query_positions, format_options)
     }
 
     // Returns the formatted version of the original text.
@@ -129,50 +129,50 @@ impl<'t> Matcher<'t, '_, '_, '_> {
             return Cow::Borrowed(self.text);
         }
 
-        let (first, indexes) = match self.get_match_bounds(format_options) {
-            MatchBounds::Full => {
-                return Cow::Borrowed(self.text);
-            }
-            MatchBounds::Formatted { highlight_toggle: first, indexes } => (first, indexes),
+        let MatchBounds::Formatted { mut highlight_toggle, indexes } =
+            self.get_match_bounds(format_options)
+        else {
+            return Cow::Borrowed(self.text);
         };
 
-        let mut should_be_highlighted = first;
-        let mut formatted = Vec::new();
+        let mut formatted_text = Vec::new();
 
-        let mut previous_index = &indexes[0];
-        let indexes_iter = indexes.iter().skip(1);
+        let mut indexes_iter = indexes.into_iter();
+        let Some(mut previous_index) = indexes_iter.next() else {
+            todo!("then what? just return borrowed?");
+        };
 
         // push crop marker if it's not the start of the text
-        if !self.crop_marker.is_empty() && *previous_index != 0 {
-            formatted.push(self.crop_marker);
+        if !self.crop_marker.is_empty() && previous_index != 0 {
+            formatted_text.push(self.crop_marker);
         }
 
         for index in indexes_iter {
-            if should_be_highlighted {
-                formatted.push(self.highlight_prefix);
+            if highlight_toggle {
+                formatted_text.push(self.highlight_prefix);
             }
 
-            formatted.push(&self.text[*previous_index..*index]);
+            formatted_text.push(&self.text[previous_index..index]);
 
-            if should_be_highlighted {
-                formatted.push(self.highlight_suffix);
+            if highlight_toggle {
+                formatted_text.push(self.highlight_suffix);
             }
 
-            should_be_highlighted = !should_be_highlighted;
+            highlight_toggle = !highlight_toggle;
             previous_index = index;
         }
 
         // push crop marker if it's not the end of the text
-        if !self.crop_marker.is_empty() && *previous_index < self.text.len() {
-            formatted.push(self.crop_marker);
+        if !self.crop_marker.is_empty() && previous_index < self.text.len() {
+            formatted_text.push(self.crop_marker);
         }
 
-        if formatted.len() == 1 {
+        if formatted_text.len() == 1 {
             // avoid concatenating if there is only one element
-            return Cow::Owned(formatted[0].to_string());
+            return Cow::Owned(formatted_text[0].to_string());
         }
 
-        Cow::Owned(formatted.concat())
+        Cow::Owned(formatted_text.concat())
     }
 }
 
@@ -529,39 +529,39 @@ mod tests {
         //     @"<em>The groundbreaking invention had the power to split the world</em>…"
         // );
 
-        // let builder = MatcherBuilder::new_test(
-        //     &rtxn,
-        //     &temp_index,
-        //     "\"The groundbreaking invention had the power to split the world between those\"",
-        // );
-        // let mut matcher = builder.build(text, None);
-        // insta::assert_snapshot!(
-        //     matcher.get_formatted_text(format_options),
-        //     @"<em>The groundbreaking invention had the power to split the world</em>…"
-        // );
+        let builder = MatcherBuilder::new_test(
+            &rtxn,
+            &temp_index,
+            "\"The groundbreaking invention had the power to split the world between those\"",
+        );
+        let mut matcher = builder.build(text, None);
+        insta::assert_snapshot!(
+            matcher.get_formatted_text(format_options),
+            @"<em>The groundbreaking invention had the power to split the world</em>…"
+        );
 
-        // let builder = MatcherBuilder::new_test(
-        //     &rtxn,
-        //     &temp_index,
-        //     "\"The groundbreaking invention\" \"embraced progress and those who resisted change!\"",
-        // );
-        // let mut matcher = builder.build(text, None);
-        // insta::assert_snapshot!(
-        //     matcher.get_formatted_text(format_options),
-        //     // TODO: Should include exclamation mark without crop markers
-        //     @"…between those who <em>embraced progress and those who resisted change</em>!"
-        // );
+        let builder = MatcherBuilder::new_test(
+            &rtxn,
+            &temp_index,
+            "\"The groundbreaking invention\" \"embraced progress and those who resisted change!\"",
+        );
+        let mut matcher = builder.build(text, None);
+        insta::assert_snapshot!(
+            matcher.get_formatted_text(format_options),
+            // TODO: Should include exclamation mark without crop markers
+            @"…between those who <em>embraced progress and those who resisted change</em>!"
+        );
 
-        // let builder = MatcherBuilder::new_test(
-        //     &rtxn,
-        //     &temp_index,
-        //     "\"groundbreaking invention\" \"split the world between\"",
-        // );
-        // let mut matcher = builder.build(text, None);
-        // insta::assert_snapshot!(
-        //     matcher.get_formatted_text(format_options),
-        //     @"…<em>groundbreaking invention</em> had the power to <em>split the world between</em>…"
-        // );
+        let builder = MatcherBuilder::new_test(
+            &rtxn,
+            &temp_index,
+            "\"groundbreaking invention\" \"split the world between\"",
+        );
+        let mut matcher = builder.build(text, None);
+        insta::assert_snapshot!(
+            matcher.get_formatted_text(format_options),
+            @"…<em>groundbreaking invention</em> had the power to <em>split the world between</em>…"
+        );
 
         let builder = MatcherBuilder::new_test(
             &rtxn,

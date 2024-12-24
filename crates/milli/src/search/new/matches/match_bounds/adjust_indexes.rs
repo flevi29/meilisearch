@@ -1,3 +1,5 @@
+use std::cmp::Ordering;
+
 use charabia::{SeparatorKind, Token, TokenKind};
 
 enum SimpleTokenKind {
@@ -154,7 +156,6 @@ pub fn get_adjusted_indexes_for_highlights_and_crop_size(
     words_count: usize,
     crop_size: usize,
 ) -> [usize; 2] {
-    use std::cmp::Ordering;
     match words_count.cmp(&crop_size) {
         Ordering::Less => get_adjusted_indexes_for_too_few_words(
             tokens,

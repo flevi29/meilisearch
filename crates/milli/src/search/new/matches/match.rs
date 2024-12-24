@@ -1,15 +1,14 @@
-use super::matching_words::UserQueryPositionRange;
-
+#[cfg_attr(test, derive(Debug, PartialEq))]
 pub enum MatchPosition {
     Word { word_position: usize, token_position: usize },
     Phrase { word_position_range: [usize; 2], token_position_range: [usize; 2] },
 }
 
+#[cfg_attr(test, derive(Debug, PartialEq))]
 pub struct Match {
     pub char_count: usize,
     pub byte_len: usize,
     pub position: MatchPosition,
-    pub query_position_range: UserQueryPositionRange,
 }
 
 impl Match {

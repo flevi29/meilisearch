@@ -1,5 +1,5 @@
 use std::cmp::Reverse;
-use std::fmt::Debug;
+use std::fmt::{Debug, Formatter, Result};
 
 use charabia::Token;
 
@@ -63,6 +63,12 @@ pub struct MatchingWords {
     located_matching_words: Vec<LocatedMatchingWords>,
 }
 
+#[cfg_attr(test, derive(Debug, PartialEq))]
+pub struct QueryPosition {
+    pub range: UserQueryPositionRange,
+    pub index: usize,
+}
+
 impl MatchingWords {
     pub fn new(ctx: SearchContext, located_terms: &[LocatedQueryTerm]) -> Self {
         let mut located_matching_phrases = Vec::new();
@@ -106,7 +112,7 @@ impl MatchingWords {
     fn try_get_phrase_match<'a>(
         &self,
         token_position_helper_iter: &mut (impl Iterator<Item = TokenPositionHelper<'a>> + Clone),
-    ) -> Option<Match> {
+    ) -> Option<(Match, UserQueryPositionRange)> {
         let mut mapped_phrase_iter = self.located_matching_phrases.iter().map(|lmp| {
             let words_iter = self
                 .phrase_interner
@@ -120,9 +126,7 @@ impl MatchingWords {
         });
 
         'outer: loop {
-            let Some((query_position, mut words_iter)) = mapped_phrase_iter.next() else {
-                return None;
-            };
+            let (query_position_range, mut words_iter) = mapped_phrase_iter.next()?;
 
             // TODO: Is it worth only cloning if we have to?
             let mut tph_iter = token_position_helper_iter.clone();
@@ -169,29 +173,41 @@ impl MatchingWords {
                 }
             };
 
-            let Some(
-                [first_tph_position_by_token, first_tph_position_by_word, first_tph_char_start, first_tph_byte_start],
-            ) = first_tph_details
-            else {
-                panic!("TODO");
-            };
+            let [first_tph_position_by_token, first_tph_position_by_word, first_tph_char_start, first_tph_byte_start] =
+                first_tph_details.expect("TODO");
             let [last_tph_position_by_token, last_tph_position_by_word, last_tph_char_end, last_tph_byte_end] =
                 last_tph_details;
 
+            // save new position in parameter iterator
             *token_position_helper_iter = tph_iter;
 
-            return Some(Match::Phrase {
-                byte_len: last_tph_byte_end - first_tph_byte_start + 1,
-                char_count: last_tph_char_end - first_tph_char_start + 1,
-                word_position_range: [first_tph_position_by_word, last_tph_position_by_word],
-                token_position_range: [first_tph_position_by_token, last_tph_position_by_token],
-                query_position_range: query_position,
-            });
+            return Some((
+                Match {
+                    // do not +1, because Token index ranges are exclusive
+                    byte_len: last_tph_byte_end - first_tph_byte_start,
+                    char_count: last_tph_char_end - first_tph_char_start,
+                    position: MatchPosition::Phrase {
+                        word_position_range: [
+                            first_tph_position_by_word,
+                            last_tph_position_by_word,
+                        ],
+                        token_position_range: [
+                            first_tph_position_by_token,
+                            last_tph_position_by_token,
+                        ],
+                    },
+                },
+                query_position_range,
+            ));
         }
     }
 
     /// Try to match the token with one of the located_words.
-    fn try_get_word_match(&self, tph: TokenPositionHelper) -> Option<Match> {
+    fn try_get_word_match(
+        &self,
+        tph: TokenPositionHelper,
+        text: &str,
+    ) -> Option<(Match, UserQueryPositionRange)> {
         let mut iter =
             self.located_matching_words.iter().flat_map(|lw| lw.value.iter().map(move |w| (lw, w)));
 
@@ -202,8 +218,8 @@ impl MatchingWords {
             let [char_count, byte_len] =
                 if located_words.is_prefix && tph.token.lemma().starts_with(word) {
                     // TODO: Isn't there something on [Token] already for this, or something that makes this simpler?
-                    // if the word is a prefix we match using starts_with
-                    let Some(prefix_byte_len) = word
+                    //       Doesn't seem like it. Maybe ask devs?
+                    let Some(prefix_byte_len) = text[tph.token.byte_start..]
                         .char_indices()
                         .nth(located_words.original_char_count - 1)
                         .map(|(char_index, c)| char_index + c.len_utf8())
@@ -213,35 +229,46 @@ impl MatchingWords {
 
                     [located_words.original_char_count, prefix_byte_len]
                 } else if tph.token.lemma() == word {
-                    // else if we exact, match the token
+                    // do not +1, because Token index ranges are exclusive
                     [
-                        tph.token.char_end - tph.token.char_start + 1,
-                        tph.token.byte_end - tph.token.byte_start + 1,
+                        tph.token.char_end - tph.token.char_start,
+                        tph.token.byte_end - tph.token.byte_start,
                     ]
                 } else {
                     continue;
                 };
 
-            return Some(Match {
-                char_count,
-                byte_len,
-                position: MatchPosition::Word {
-                    word_position: tph.position_by_word,
-                    token_position: tph.position_by_token,
+            return Some((
+                Match {
+                    char_count,
+                    byte_len,
+                    position: MatchPosition::Word {
+                        word_position: tph.position_by_word,
+                        token_position: tph.position_by_token,
+                    },
                 },
-                query_position_range: located_words.position,
-            });
+                located_words.position,
+            ));
         }
     }
 
-    pub fn get_matches(&self, tokens: &[Token]) -> Vec<Match> {
+    pub fn get_matches_and_query_positions(
+        &self,
+        tokens: &[Token],
+        text: &str,
+    ) -> (Vec<Match>, Vec<QueryPosition>) {
+        // TODO: Note in the doc that with the help of this iter, matches are guaranteed to be ordered
         let mut token_position_helper_iter = TokenPositionHelper::iter_from_tokens(tokens);
         let mut matches = Vec::new();
+        let mut query_positions = Vec::new();
 
         loop {
             // try and get a phrase match
-            if let Some(r#match) = self.try_get_phrase_match(&mut token_position_helper_iter) {
+            if let Some((r#match, range)) =
+                self.try_get_phrase_match(&mut token_position_helper_iter)
+            {
                 matches.push(r#match);
+                query_positions.push(QueryPosition { range, index: matches.len() - 1 });
 
                 continue;
             }
@@ -249,8 +276,9 @@ impl MatchingWords {
             // if the above fails, try get next token position helper
             if let Some(tph) = token_position_helper_iter.next() {
                 // and then try and get a word match
-                if let Some(r#match) = self.try_get_word_match(tph) {
+                if let Some((r#match, range)) = self.try_get_word_match(tph, text) {
                     matches.push(r#match);
+                    query_positions.push(QueryPosition { range, index: matches.len() - 1 });
                 }
             } else {
                 // there are no more items in the iterator, we are done searching for matches
@@ -259,14 +287,14 @@ impl MatchingWords {
         }
 
         // TODO: Explain why
-        matches.sort_unstable_by(|a, b| a.query_position_range[0].cmp(&b.query_position_range[0]));
+        query_positions.sort_unstable_by_key(|v| v.range[0]);
 
-        matches
+        (matches, query_positions)
     }
 }
 
 impl Debug for MatchingWords {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    fn fmt(&self, f: &mut Formatter<'_>) -> Result {
         let MatchingWords {
             word_interner,
             phrase_interner,
@@ -285,7 +313,7 @@ impl Debug for MatchingWords {
                         .map(|w| w.map_or("STOP_WORD", |w| word_interner.get(w)))
                         .collect::<Vec<_>>()
                         .join(" "),
-                    p.position.clone(),
+                    p.position,
                 )
             })
             .collect();
@@ -295,7 +323,7 @@ impl Debug for MatchingWords {
             .flat_map(|w| {
                 w.value
                     .iter()
-                    .map(|s| (word_interner.get(*s), w.position.clone(), w.is_prefix))
+                    .map(|s| (word_interner.get(*s), w.position, w.is_prefix))
                     .collect::<Vec<_>>()
             })
             .collect();
@@ -334,79 +362,77 @@ pub(crate) mod tests {
         let mut ctx = SearchContext::new(&temp_index, &rtxn).unwrap();
         let mut builder = TokenizerBuilder::default();
         let tokenizer = builder.build();
-        let tokens = tokenizer.tokenize("split this world");
+        let text = "split this world";
+        let tokens = tokenizer.tokenize(text);
         let ExtractedTokens { query_terms, .. } =
             located_query_terms_from_tokens(&mut ctx, tokens, None).unwrap();
         let matching_words = MatchingWords::new(ctx, &query_terms);
 
         assert_eq!(
-            matching_words
-                .match_token(&Token {
-                    kind: TokenKind::Word,
-                    lemma: Cow::Borrowed("split"),
-                    char_end: "split".chars().count(),
-                    byte_end: "split".len(),
-                    ..Default::default()
-                })
-                .next(),
-            Some(MatchType::Complete {
-                details: CompleteMatch::Full { char_count: 5, byte_len: 5 },
-                position: [0, 0]
-            })
-        );
-        assert_eq!(
-            matching_words
-                .match_token(&Token {
-                    kind: TokenKind::Word,
-                    lemma: Cow::Borrowed("nyc"),
-                    char_end: "nyc".chars().count(),
-                    byte_end: "nyc".len(),
-                    ..Default::default()
-                })
-                .next(),
-            None
-        );
-        assert_eq!(
-            matching_words
-                .match_token(&Token {
-                    kind: TokenKind::Word,
-                    lemma: Cow::Borrowed("world"),
-                    char_end: "world".chars().count(),
-                    byte_end: "world".len(),
-                    ..Default::default()
-                })
-                .next(),
-            Some(MatchType::Complete {
-                details: CompleteMatch::Full { char_count: 5, byte_len: 5 },
-                position: [2, 2]
-            })
-        );
-        assert_eq!(
-            matching_words
-                .match_token(&Token {
-                    kind: TokenKind::Word,
-                    lemma: Cow::Borrowed("worlded"),
-                    char_end: "worlded".chars().count(),
-                    byte_end: "worlded".len(),
-                    ..Default::default()
-                })
-                .next(),
-            Some(MatchType::Complete {
-                details: CompleteMatch::Full { char_count: 5, byte_len: 5 },
-                position: [2, 2]
-            })
-        );
-        assert_eq!(
-            matching_words
-                .match_token(&Token {
-                    kind: TokenKind::Word,
-                    lemma: Cow::Borrowed("thisnew"),
-                    char_end: "thisnew".chars().count(),
-                    byte_end: "thisnew".len(),
-                    ..Default::default()
-                })
-                .next(),
-            None
+            matching_words.get_matches_and_query_positions(
+                &[
+                    Token {
+                        kind: TokenKind::Word,
+                        lemma: Cow::Borrowed("split"),
+                        char_end: "split".chars().count(),
+                        byte_end: "split".len(),
+                        ..Default::default()
+                    },
+                    Token {
+                        kind: TokenKind::Word,
+                        lemma: Cow::Borrowed("nyc"),
+                        char_end: "nyc".chars().count(),
+                        byte_end: "nyc".len(),
+                        ..Default::default()
+                    },
+                    Token {
+                        kind: TokenKind::Word,
+                        lemma: Cow::Borrowed("world"),
+                        char_end: "world".chars().count(),
+                        byte_end: "world".len(),
+                        ..Default::default()
+                    },
+                    Token {
+                        kind: TokenKind::Word,
+                        lemma: Cow::Borrowed("worlded"),
+                        char_end: "worlded".chars().count(),
+                        byte_end: "worlded".len(),
+                        ..Default::default()
+                    },
+                    Token {
+                        kind: TokenKind::Word,
+                        lemma: Cow::Borrowed("thisnew"),
+                        char_end: "thisnew".chars().count(),
+                        byte_end: "thisnew".len(),
+                        ..Default::default()
+                    }
+                ],
+                text
+            ),
+            (
+                vec![
+                    Match {
+                        char_count: 5,
+                        byte_len: 5,
+                        position: MatchPosition::Word { word_position: 0, token_position: 0 }
+                    },
+                    Match {
+                        char_count: 5,
+                        byte_len: 5,
+                        position: MatchPosition::Word { word_position: 2, token_position: 2 }
+                    },
+                    Match {
+                        char_count: 5,
+                        byte_len: 5,
+                        position: MatchPosition::Word { word_position: 3, token_position: 3 }
+                    }
+                ],
+                vec![
+                    QueryPosition { range: [0, 0], index: 0 },
+                    QueryPosition { range: [2, 2], index: 1 },
+                    QueryPosition { range: [2, 2], index: 2 }
+                ]
+            )
         );
     }
 }
