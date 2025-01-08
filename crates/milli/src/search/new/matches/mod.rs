@@ -9,63 +9,38 @@ use matching_words::QueryPosition;
 use r#match::Match;
 use std::borrow::Cow;
 
-const DEFAULT_CROP_MARKER: &str = "…";
-const DEFAULT_HIGHLIGHT_PREFIX: &str = "<em>";
-const DEFAULT_HIGHLIGHT_SUFFIX: &str = "</em>";
-
-/// Structure used to build a Matcher allowing to customize formating tags.
-pub struct MatcherBuilder<'m> {
-    matching_words: MatchingWords,
-    tokenizer: Tokenizer<'m>,
-    crop_marker: Option<String>,
-    highlight_prefix: Option<String>,
-    highlight_suffix: Option<String>,
+pub struct MarkerOptions {
+    pub highlight_pre_tag: String,
+    pub highlight_post_tag: String,
+    pub crop_marker: String,
 }
 
-impl<'m> MatcherBuilder<'m> {
-    pub fn new(matching_words: MatchingWords, tokenizer: Tokenizer<'m>) -> Self {
-        Self {
-            matching_words,
-            tokenizer,
-            crop_marker: None,
-            highlight_prefix: None,
-            highlight_suffix: None,
-        }
-    }
+/// Structure used to build a Matcher allowing to customize formating tags.
+pub struct MatcherBuilder<'a> {
+    matching_words: MatchingWords,
+    tokenizer: Tokenizer<'a>,
+    marker_options: MarkerOptions,
+}
 
-    pub fn crop_marker(&mut self, marker: String) -> &Self {
-        self.crop_marker = Some(marker);
-        self
-    }
-
-    pub fn highlight_prefix(&mut self, prefix: String) -> &Self {
-        self.highlight_prefix = Some(prefix);
-        self
-    }
-
-    pub fn highlight_suffix(&mut self, suffix: String) -> &Self {
-        self.highlight_suffix = Some(suffix);
-        self
+impl<'a> MatcherBuilder<'a> {
+    pub fn new(
+        matching_words: MatchingWords,
+        tokenizer: Tokenizer<'a>,
+        marker_options: MarkerOptions,
+    ) -> Self {
+        Self { matching_words, tokenizer, marker_options }
     }
 
     pub fn build<'t, 'lang>(
         &self,
         text: &'t str,
         locales: Option<&'lang [Language]>,
-    ) -> Matcher<'t, 'm, '_, 'lang> {
+    ) -> Matcher<'t, 'a, '_, 'lang> {
         Matcher {
             text,
             matching_words: &self.matching_words,
             tokenizer: &self.tokenizer,
-            crop_marker: self.crop_marker.as_ref().map_or(DEFAULT_CROP_MARKER, |v| v.as_str()),
-            highlight_prefix: self
-                .highlight_prefix
-                .as_ref()
-                .map_or(DEFAULT_HIGHLIGHT_PREFIX, |v| v.as_str()),
-            highlight_suffix: self
-                .highlight_suffix
-                .as_ref()
-                .map_or(DEFAULT_HIGHLIGHT_SUFFIX, |v| v.as_str()),
+            marker_options: &self.marker_options,
             tokens_matches_and_query_positions: None,
             locales,
         }
@@ -95,15 +70,17 @@ pub struct Matcher<'t, 'tokenizer, 'b, 'lang> {
     matching_words: &'b MatchingWords,
     tokenizer: &'b Tokenizer<'tokenizer>,
     locales: Option<&'lang [Language]>,
-    crop_marker: &'b str,
-    highlight_prefix: &'b str,
-    highlight_suffix: &'b str,
+    marker_options: &'b MarkerOptions,
     tokens_matches_and_query_positions: Option<((Vec<Match>, Vec<QueryPosition>), Vec<Token<'t>>)>,
 }
 
 impl<'t> Matcher<'t, '_, '_, '_> {
     /// TODO: description
-    pub fn get_match_bounds(&mut self, format_options: FormatOptions) -> MatchBounds {
+    pub fn get_match_bounds(
+        &mut self,
+        array_indices: &[usize],
+        format_options: FormatOptions,
+    ) -> MatchBounds {
         if self.text.is_empty() {
             return MatchBounds::Full;
         }
@@ -119,60 +96,22 @@ impl<'t> Matcher<'t, '_, '_, '_> {
                 (self.matching_words.get_matches_and_query_positions(&tokens, self.text), tokens)
             });
 
-        match_bounds::get_match_bounds(tokens, matches, query_positions, format_options)
+        MatchBounds::new(tokens, matches, query_positions, array_indices, format_options)
     }
 
     // Returns the formatted version of the original text.
-    pub fn get_formatted_text(&mut self, format_options: FormatOptions) -> Cow<'t, str> {
+    pub fn get_formatted_text(
+        &mut self,
+        array_indices: &[usize],
+        format_options: FormatOptions,
+    ) -> Cow<'t, str> {
         if !format_options.highlight && format_options.crop.is_none() {
             // compute matches is not needed if no highlight nor crop is requested
             return Cow::Borrowed(self.text);
         }
 
-        let MatchBounds::Formatted { mut highlight_toggle, indexes } =
-            self.get_match_bounds(format_options)
-        else {
-            return Cow::Borrowed(self.text);
-        };
-
-        let mut formatted_text = Vec::new();
-
-        let mut indexes_iter = indexes.into_iter();
-        let Some(mut previous_index) = indexes_iter.next() else {
-            todo!("then what? just return borrowed?");
-        };
-
-        // push crop marker if it's not the start of the text
-        if !self.crop_marker.is_empty() && previous_index != 0 {
-            formatted_text.push(self.crop_marker);
-        }
-
-        for index in indexes_iter {
-            if highlight_toggle {
-                formatted_text.push(self.highlight_prefix);
-            }
-
-            formatted_text.push(&self.text[previous_index..index]);
-
-            if highlight_toggle {
-                formatted_text.push(self.highlight_suffix);
-            }
-
-            highlight_toggle = !highlight_toggle;
-            previous_index = index;
-        }
-
-        // push crop marker if it's not the end of the text
-        if !self.crop_marker.is_empty() && previous_index < self.text.len() {
-            formatted_text.push(self.crop_marker);
-        }
-
-        if formatted_text.len() == 1 {
-            // avoid concatenating if there is only one element
-            return Cow::Owned(formatted_text[0].to_string());
-        }
-
-        Cow::Owned(formatted_text.concat())
+        self.get_match_bounds(array_indices, format_options)
+            .to_formatted_text(self.text, self.marker_options)
     }
 }
 
@@ -216,7 +155,15 @@ mod tests {
                 None => MatchingWords::default(),
             };
 
-            MatcherBuilder::new(matching_words, TokenizerBuilder::default().into_tokenizer())
+            MatcherBuilder::new(
+                matching_words,
+                TokenizerBuilder::default().into_tokenizer(),
+                MarkerOptions {
+                    highlight_pre_tag: "<em>".to_string(),
+                    highlight_post_tag: "</em>".to_string(),
+                    crop_marker: "…".to_string(),
+                },
+            )
         }
     }
 

@@ -19,17 +19,22 @@ use meilisearch_types::locales::Locale;
 use meilisearch_types::milli::score_details::{ScoreDetails, ScoringStrategy};
 use meilisearch_types::milli::vector::parsed_vectors::ExplicitVectors;
 use meilisearch_types::milli::vector::Embedder;
-use meilisearch_types::milli::{FacetValueHit, OrderBy, SearchForFacetValues, TimeBudget};
+use meilisearch_types::milli::{
+    FacetValueHit, InternalError, OrderBy, SearchForFacetValues, TimeBudget,
+};
 use meilisearch_types::settings::DEFAULT_PAGINATION_MAX_TOTAL_HITS;
 use meilisearch_types::{milli, Document};
 use milli::tokenizer::{Language, TokenizerBuilder};
 use milli::{
     AscDesc, FieldId, FieldsIdsMap, Filter, FormatOptions, Index, LocalizedAttributesRule,
-    MatchBounds, MatcherBuilder, SortError, TermsMatchingStrategy, DEFAULT_VALUES_PER_FACET,
+    MarkerOptions, MatchBounds, MatcherBuilder, SortError, TermsMatchingStrategy,
+    DEFAULT_VALUES_PER_FACET,
 };
 use regex::Regex;
 use serde::Serialize;
 use serde_json::{json, Value};
+#[cfg(test)]
+mod mod_test;
 
 use crate::error::MeilisearchHttpError;
 
@@ -283,35 +288,38 @@ pub enum SearchKind {
 impl SearchKind {
     pub(crate) fn semantic(
         index_scheduler: &index_scheduler::IndexScheduler,
+        index_uid: String,
         index: &Index,
         embedder_name: &str,
         vector_len: Option<usize>,
     ) -> Result<Self, ResponseError> {
         let (embedder_name, embedder, quantized) =
-            Self::embedder(index_scheduler, index, embedder_name, vector_len)?;
+            Self::embedder(index_scheduler, index_uid, index, embedder_name, vector_len)?;
         Ok(Self::SemanticOnly { embedder_name, embedder, quantized })
     }
 
     pub(crate) fn hybrid(
         index_scheduler: &index_scheduler::IndexScheduler,
+        index_uid: String,
         index: &Index,
         embedder_name: &str,
         semantic_ratio: f32,
         vector_len: Option<usize>,
     ) -> Result<Self, ResponseError> {
         let (embedder_name, embedder, quantized) =
-            Self::embedder(index_scheduler, index, embedder_name, vector_len)?;
+            Self::embedder(index_scheduler, index_uid, index, embedder_name, vector_len)?;
         Ok(Self::Hybrid { embedder_name, embedder, quantized, semantic_ratio })
     }
 
     pub(crate) fn embedder(
         index_scheduler: &index_scheduler::IndexScheduler,
+        index_uid: String,
         index: &Index,
         embedder_name: &str,
         vector_len: Option<usize>,
     ) -> Result<(String, Arc<Embedder>, bool), ResponseError> {
         let embedder_configs = index.embedding_configs(&index.read_txn()?)?;
-        let embedders = index_scheduler.embedders(embedder_configs)?;
+        let embedders = index_scheduler.embedders(index_uid, embedder_configs)?;
 
         let (embedder, _, quantized) = embedders
             .get(embedder_name)
@@ -633,8 +641,8 @@ impl From<FacetValuesSort> for OrderBy {
 pub struct SearchHit {
     #[serde(flatten)]
     pub document: Document,
-    #[serde(rename = "_formatted", skip_serializing_if = "Option::is_none")]
-    pub formatted: Option<Document>,
+    #[serde(rename = "_formatted", skip_serializing_if = "Document::is_empty")]
+    pub formatted: Document,
     #[serde(rename = "_matchesPosition", skip_serializing_if = "Option::is_none")]
     pub matches_position: Option<MatchesPosition>,
     #[serde(rename = "_rankingScore", skip_serializing_if = "Option::is_none")]
@@ -798,8 +806,10 @@ fn prepare_search<'t>(
                     let span = tracing::trace_span!(target: "search::vector", "embed_one");
                     let _entered = span.enter();
 
+                    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+
                     embedder
-                        .embed_one(query.q.clone().unwrap())
+                        .embed_one(query.q.clone().unwrap(), Some(deadline))
                         .map_err(milli::vector::Error::from)
                         .map_err(milli::Error::from)?
                 }
@@ -890,6 +900,7 @@ fn prepare_search<'t>(
 }
 
 pub fn perform_search(
+    index_uid: String,
     index: &Index,
     query: SearchQuery,
     search_kind: SearchKind,
@@ -916,7 +927,7 @@ pub fn perform_search(
             used_negative_operator,
         },
         semantic_hit_count,
-    ) = search_from_kind(search_kind, search)?;
+    ) = search_from_kind(index_uid, search_kind, search)?;
 
     let SearchQuery {
         q,
@@ -1069,22 +1080,32 @@ fn compute_facet_distribution_stats<S: AsRef<str>>(
 }
 
 pub fn search_from_kind(
+    index_uid: String,
     search_kind: SearchKind,
     search: milli::Search<'_>,
 ) -> Result<(milli::SearchResult, Option<u32>), MeilisearchHttpError> {
     let (milli_result, semantic_hit_count) = match &search_kind {
-        SearchKind::KeywordOnly => (search.execute()?, None),
+        SearchKind::KeywordOnly => {
+            let results = search
+                .execute()
+                .map_err(|e| MeilisearchHttpError::from_milli(e, Some(index_uid.to_string())))?;
+            (results, None)
+        }
         SearchKind::SemanticOnly { .. } => {
-            let results = search.execute()?;
+            let results = search
+                .execute()
+                .map_err(|e| MeilisearchHttpError::from_milli(e, Some(index_uid.to_string())))?;
             let semantic_hit_count = results.document_scores.len() as u32;
             (results, Some(semantic_hit_count))
         }
-        SearchKind::Hybrid { semantic_ratio, .. } => search.execute_hybrid(*semantic_ratio)?,
+        SearchKind::Hybrid { semantic_ratio, .. } => search
+            .execute_hybrid(*semantic_ratio)
+            .map_err(|e| MeilisearchHttpError::from_milli(e, Some(index_uid)))?,
     };
     Ok((milli_result, semantic_hit_count))
 }
 
-struct AttributesFormat {
+pub struct AttributesFormat {
     attributes_to_retrieve: Option<BTreeSet<String>>,
     retrieve_vectors: RetrieveVectors,
     attributes_to_highlight: Option<HashSet<String>>,
@@ -1139,7 +1160,7 @@ struct HitMaker<'a> {
     retrieve_vectors: RetrieveVectors,
     to_retrieve_ids: BTreeSet<FieldId>,
     embedding_configs: Vec<milli::index::IndexEmbeddingConfig>,
-    formatter_builder: MatcherBuilder<'a>,
+    matcher_builder: MatcherBuilder<'a>,
     formatted_options: BTreeMap<FieldId, FormatOptions>,
     show_ranking_score: bool,
     show_ranking_score_details: bool,
@@ -1167,24 +1188,22 @@ impl<'a> HitMaker<'a> {
         tokenizer_builder.into_tokenizer()
     }
 
-    pub fn formatter_builder(
-        matching_words: milli::MatchingWords,
-        tokenizer: milli::tokenizer::Tokenizer<'_>,
-    ) -> MatcherBuilder<'_> {
-        let formatter_builder = MatcherBuilder::new(matching_words, tokenizer);
-
-        formatter_builder
-    }
-
     pub fn new(
+        matching_words: milli::MatchingWords,
+        tokenizer: milli::tokenizer::Tokenizer<'a>,
+        attributes_format: AttributesFormat,
         index: &'a Index,
         rtxn: &'a RoTxn<'a>,
-        format: AttributesFormat,
-        mut formatter_builder: MatcherBuilder<'a>,
-    ) -> Result<Self, MeilisearchHttpError> {
-        formatter_builder.crop_marker(format.crop_marker);
-        formatter_builder.highlight_prefix(format.highlight_pre_tag);
-        formatter_builder.highlight_suffix(format.highlight_post_tag);
+    ) -> milli::Result<Self> {
+        let matcher_builder = MatcherBuilder::new(
+            matching_words,
+            tokenizer,
+            MarkerOptions {
+                highlight_pre_tag: attributes_format.highlight_pre_tag,
+                highlight_post_tag: attributes_format.highlight_post_tag,
+                crop_marker: attributes_format.crop_marker,
+            },
+        );
 
         let fields_ids_map = index.fields_ids_map(rtxn)?;
         let displayed_ids = index
@@ -1211,14 +1230,15 @@ impl<'a> HitMaker<'a> {
         let displayed_ids =
             displayed_ids.unwrap_or_else(|| fields_ids_map.iter().map(|(id, _)| id).collect());
 
-        let retrieve_vectors = if let RetrieveVectors::Retrieve = format.retrieve_vectors {
+        let retrieve_vectors = if let RetrieveVectors::Retrieve = attributes_format.retrieve_vectors
+        {
             if vectors_is_hidden {
                 RetrieveVectors::Hide
             } else {
                 RetrieveVectors::Retrieve
             }
         } else {
-            format.retrieve_vectors
+            attributes_format.retrieve_vectors
         };
 
         let fids = |attrs: &BTreeSet<String>| {
@@ -1235,7 +1255,7 @@ impl<'a> HitMaker<'a> {
             }
             ids
         };
-        let to_retrieve_ids: BTreeSet<_> = format
+        let to_retrieve_ids: BTreeSet<_> = attributes_format
             .attributes_to_retrieve
             .as_ref()
             .map(fids)
@@ -1244,12 +1264,12 @@ impl<'a> HitMaker<'a> {
             .cloned()
             .collect();
 
-        let attr_to_highlight = format.attributes_to_highlight.unwrap_or_default();
-        let attr_to_crop = format.attributes_to_crop.unwrap_or_default();
+        let attr_to_highlight = attributes_format.attributes_to_highlight.unwrap_or_default();
+        let attr_to_crop = attributes_format.attributes_to_crop.unwrap_or_default();
         let formatted_options = compute_formatted_options(
             &attr_to_highlight,
             &attr_to_crop,
-            format.crop_length,
+            attributes_format.crop_length,
             &to_retrieve_ids,
             &fields_ids_map,
             &displayed_ids,
@@ -1266,21 +1286,17 @@ impl<'a> HitMaker<'a> {
             retrieve_vectors,
             to_retrieve_ids,
             embedding_configs,
-            formatter_builder,
+            matcher_builder,
             formatted_options,
-            show_ranking_score: format.show_ranking_score,
-            show_ranking_score_details: format.show_ranking_score_details,
-            show_matches_position: format.show_matches_position,
-            sort: format.sort,
-            locales: format.locales,
+            show_ranking_score: attributes_format.show_ranking_score,
+            show_ranking_score_details: attributes_format.show_ranking_score_details,
+            show_matches_position: attributes_format.show_matches_position,
+            sort: attributes_format.sort,
+            locales: attributes_format.locales,
         })
     }
 
-    pub fn make_hit(
-        &self,
-        id: u32,
-        score: &[ScoreDetails],
-    ) -> Result<SearchHit, MeilisearchHttpError> {
+    pub fn make_hit(&self, id: u32, score: &[ScoreDetails]) -> milli::Result<SearchHit> {
         let (_, obkv) =
             self.index.iter_documents(self.rtxn, std::iter::once(id))?.next().unwrap()?;
 
@@ -1323,7 +1339,10 @@ impl<'a> HitMaker<'a> {
                     .is_some_and(|conf| conf.user_provided.contains(id));
                 let embeddings =
                     ExplicitVectors { embeddings: Some(vector.into()), regenerate: !user_provided };
-                vectors.insert(name, serde_json::to_value(embeddings)?);
+                vectors.insert(
+                    name,
+                    serde_json::to_value(embeddings).map_err(InternalError::SerdeJson)?,
+                );
             }
             document.insert("_vectors".into(), vectors.into());
         }
@@ -1334,7 +1353,7 @@ impl<'a> HitMaker<'a> {
         let (matches_position, formatted) = format_fields(
             &displayed_document,
             &self.fields_ids_map,
-            &self.formatter_builder,
+            &self.matcher_builder,
             &self.formatted_options,
             self.show_matches_position,
             &self.displayed_ids,
@@ -1366,10 +1385,10 @@ impl<'a> HitMaker<'a> {
 fn make_hits<'a>(
     index: &Index,
     rtxn: &RoTxn<'_>,
-    format: AttributesFormat,
+    attributes_format: AttributesFormat,
     matching_words: milli::MatchingWords,
     documents_ids_scores: impl Iterator<Item = (u32, &'a Vec<ScoreDetails>)> + 'a,
-) -> Result<Vec<SearchHit>, MeilisearchHttpError> {
+) -> milli::Result<Vec<SearchHit>> {
     let mut documents = Vec::new();
 
     let dictionary = index.dictionary(rtxn)?;
@@ -1381,9 +1400,7 @@ fn make_hits<'a>(
 
     let tokenizer = HitMaker::tokenizer(dictionary.as_deref(), separators.as_deref());
 
-    let formatter_builder = HitMaker::formatter_builder(matching_words, tokenizer);
-
-    let hit_maker = HitMaker::new(index, rtxn, format, formatter_builder)?;
+    let hit_maker = HitMaker::new(matching_words, tokenizer, attributes_format, index, rtxn)?;
 
     for (id, score) in documents_ids_scores {
         documents.push(hit_maker.make_hit(id, score)?);
@@ -1406,6 +1423,13 @@ pub fn perform_facet_search(
         Some(cutoff) => TimeBudget::new(Duration::from_millis(cutoff)),
         None => TimeBudget::default(),
     };
+
+    if !index.facet_search(&rtxn)? {
+        return Err(ResponseError::from_msg(
+            "The facet search is disabled for this index".to_string(),
+            Code::FacetSearchDisabled,
+        ));
+    }
 
     // In the faceted search context, we want to use the intersection between the locales provided by the user
     // and the locales of the facet string.
@@ -1557,7 +1581,7 @@ pub fn perform_similar(
     Ok(result)
 }
 
-fn insert_geo_distance(sorts: &[String], document: &mut Document) {
+pub fn insert_geo_distance(sorts: &[String], document: &mut Document) {
     lazy_static::lazy_static! {
         static ref GEO_REGEX: Regex =
             Regex::new(r"_geoPoint\(\s*([[:digit:].\-]+)\s*,\s*([[:digit:].\-]+)\s*\)").unwrap();
@@ -1689,13 +1713,13 @@ fn add_non_formatted_ids_to_formatted_options(
 fn make_document(
     displayed_attributes: &BTreeSet<FieldId>,
     field_ids_map: &FieldsIdsMap,
-    obkv: obkv::KvReaderU16,
-) -> Result<Document, MeilisearchHttpError> {
+    obkv: &obkv::KvReaderU16,
+) -> milli::Result<Document> {
     let mut document = serde_json::Map::new();
 
     // recreate the original json
     for (key, value) in obkv.iter() {
-        let value = serde_json::from_slice(value)?;
+        let value = serde_json::from_slice(value).map_err(InternalError::SerdeJson)?;
         let key = field_ids_map.name(key).expect("Missing field name").to_string();
 
         document.insert(key, value);
@@ -1720,7 +1744,7 @@ fn format_fields(
     displayable_ids: &BTreeSet<FieldId>,
     locales: Option<&[Language]>,
     localized_attributes: &[LocalizedAttributesRule],
-) -> Result<(Option<MatchesPosition>, Document), MeilisearchHttpError> {
+) -> milli::Result<(Option<MatchesPosition>, Document)> {
     let mut matches_position = compute_matches.then(BTreeMap::new);
     let mut document = document.clone();
 
@@ -1735,47 +1759,51 @@ fn format_fields(
     // select the attributes to retrieve
     let displayable_names =
         displayable_ids.iter().map(|&fid| field_ids_map.name(fid).expect("Missing field name"));
-    permissive_json_pointer::map_leaf_values(&mut document, displayable_names, |key, value| {
-        // To get the formatting option of each key we need to see all the rules that applies
-        // to the value and merge them together. eg. If a user said he wanted to highlight `doggo`
-        // and crop `doggo.name`. `doggo.name` needs to be highlighted + cropped while `doggo.age` is only
-        // highlighted.
-        // Warn: The time to compute the format list scales with the number of fields to format;
-        // cumulated with map_leaf_values that iterates over all the nested fields, it gives a quadratic complexity:
-        // d*f where d is the total number of fields to display and f is the total number of fields to format.
-        let format_options = formatting_fields_options
-            .iter()
-            .filter(|(name, _option)| {
-                milli::is_faceted_by(name, key) || milli::is_faceted_by(key, name)
-            })
-            .map(|(_, option)| **option)
-            .reduce(|acc, option| acc.merge(option));
-        let mut infos = Vec::new();
-
-        // if no locales has been provided, we try to find the locales in the localized_attributes.
-        let locales = locales.or_else(|| {
-            localized_attributes
+    permissive_json_pointer::map_leaf_values(
+        &mut document,
+        displayable_names,
+        |key, array_indices, value| {
+            // To get the formatting option of each key we need to see all the rules that applies
+            // to the value and merge them together. eg. If a user said he wanted to highlight `doggo`
+            // and crop `doggo.name`. `doggo.name` needs to be highlighted + cropped while `doggo.age` is only
+            // highlighted.
+            // Warn: The time to compute the format list scales with the number of fields to format;
+            // cumulated with map_leaf_values that iterates over all the nested fields, it gives a quadratic complexity:
+            // d*f where d is the total number of fields to display and f is the total number of fields to format.
+            let format = formatting_fields_options
                 .iter()
-                .find(|rule| rule.match_str(key))
-                .map(LocalizedAttributesRule::locales)
-        });
+                .filter(|(name, _option)| {
+                    milli::is_faceted_by(name, key) || milli::is_faceted_by(key, name)
+                })
+                .map(|(_, option)| **option)
+                .reduce(|acc, option| acc.merge(option));
+            let mut infos = Vec::new();
 
-        // TODO: At this point we need to somehow decide whether `_formatted` or `matches_position`
-        *value = format_value(
-            std::mem::take(value),
-            matcher_builder,
-            format_options,
-            &mut infos,
-            compute_matches,
-            locales,
-        );
+            // if no locales has been provided, we try to find the locales in the localized_attributes.
+            let locales = locales.or_else(|| {
+                localized_attributes
+                    .iter()
+                    .find(|rule| rule.match_str(key))
+                    .map(LocalizedAttributesRule::locales)
+            });
 
-        if let Some(matches) = matches_position.as_mut() {
-            if !infos.is_empty() {
-                matches.insert(key.to_owned(), infos);
+            *value = format_value(
+                std::mem::take(value),
+                matcher_builder,
+                format,
+                &mut infos,
+                compute_matches,
+                array_indices,
+                locales,
+            );
+
+            if let Some(matches) = matches_position.as_mut() {
+                if !infos.is_empty() {
+                    matches.insert(key.to_owned(), infos);
+                }
             }
-        }
-    });
+        },
+    );
 
     let selectors = formatted_options
         .keys()
@@ -1793,14 +1821,15 @@ fn format_value(
     format_options: Option<FormatOptions>,
     infos: &mut Vec<MatchBounds>,
     compute_matches: bool,
+    array_indices: &[usize],
     locales: Option<&[Language]>,
 ) -> Value {
     match value {
         Value::String(old_string) => {
             let mut matcher = builder.build(&old_string, locales);
             if compute_matches {
-                let matches = matcher.get_match_bounds();
-                infos.extend_from_slice(&matches[..]);
+                let match_bounds = matcher.get_match_bounds(array_indices);
+                infos.push(match_bounds);
             }
 
             match format_options {
@@ -1811,52 +1840,15 @@ fn format_value(
                 None => Value::String(old_string),
             }
         }
-        Value::Array(values) => Value::Array(
-            values
-                .into_iter()
-                .map(|v| {
-                    format_value(
-                        v,
-                        builder,
-                        format_options.map(|format_options| FormatOptions {
-                            highlight: format_options.highlight,
-                            crop: None,
-                        }),
-                        infos,
-                        compute_matches,
-                        locales,
-                    )
-                })
-                .collect(),
-        ),
-        Value::Object(object) => Value::Object(
-            object
-                .into_iter()
-                .map(|(k, v)| {
-                    (
-                        k,
-                        format_value(
-                            v,
-                            builder,
-                            format_options.map(|format_options| FormatOptions {
-                                highlight: format_options.highlight,
-                                crop: None,
-                            }),
-                            infos,
-                            compute_matches,
-                            locales,
-                        ),
-                    )
-                })
-                .collect(),
-        ),
+        // `map_leaf_values` makes sure this is only called for leaf fields
+        Value::Array(_) | Value::Object(_) => unreachable!(),
         Value::Number(number) => {
             let s = number.to_string();
 
             let mut matcher = builder.build(&s, locales);
             if compute_matches {
-                let matches = matcher.get_match_bounds();
-                infos.extend_from_slice(&matches[..]);
+                let match_bounds = matcher.get_match_bounds(array_indices);
+                infos.push(match_bounds);
             }
 
             match format_options {
@@ -1867,7 +1859,7 @@ fn format_value(
                 None => Value::String(s),
             }
         }
-        value => value,
+        _ => value,
     }
 }
 
@@ -1929,121 +1921,5 @@ fn parse_filter_array(arr: &[Value]) -> Result<Option<Filter>, MeilisearchHttpEr
         }
     }
 
-    Ok(Filter::from_array(ands)?)
-}
-
-#[cfg(test)]
-mod test {
-    use super::*;
-
-    #[test]
-    fn test_insert_geo_distance() {
-        let value: Document = serde_json::from_str(
-            r#"{
-              "_geo": {
-                "lat": 50.629973371633746,
-                "lng": 3.0569447399419567
-              },
-              "city": "Lille",
-              "id": "1"
-            }"#,
-        )
-        .unwrap();
-
-        let sorters = &["_geoPoint(50.629973371633746,3.0569447399419567):desc".to_string()];
-        let mut document = value.clone();
-        insert_geo_distance(sorters, &mut document);
-        assert_eq!(document.get("_geoDistance"), Some(&json!(0)));
-
-        let sorters = &["_geoPoint(50.629973371633746, 3.0569447399419567):asc".to_string()];
-        let mut document = value.clone();
-        insert_geo_distance(sorters, &mut document);
-        assert_eq!(document.get("_geoDistance"), Some(&json!(0)));
-
-        let sorters =
-            &["_geoPoint(   50.629973371633746   ,  3.0569447399419567   ):desc".to_string()];
-        let mut document = value.clone();
-        insert_geo_distance(sorters, &mut document);
-        assert_eq!(document.get("_geoDistance"), Some(&json!(0)));
-
-        let sorters = &[
-            "prix:asc",
-            "villeneuve:desc",
-            "_geoPoint(50.629973371633746, 3.0569447399419567):asc",
-            "ubu:asc",
-        ]
-        .map(|s| s.to_string());
-        let mut document = value.clone();
-        insert_geo_distance(sorters, &mut document);
-        assert_eq!(document.get("_geoDistance"), Some(&json!(0)));
-
-        // only the first geoPoint is used to compute the distance
-        let sorters = &[
-            "chien:desc",
-            "_geoPoint(50.629973371633746, 3.0569447399419567):asc",
-            "pangolin:desc",
-            "_geoPoint(100.0, -80.0):asc",
-            "chat:asc",
-        ]
-        .map(|s| s.to_string());
-        let mut document = value.clone();
-        insert_geo_distance(sorters, &mut document);
-        assert_eq!(document.get("_geoDistance"), Some(&json!(0)));
-
-        // there was no _geoPoint so nothing is inserted in the document
-        let sorters = &["chien:asc".to_string()];
-        let mut document = value;
-        insert_geo_distance(sorters, &mut document);
-        assert_eq!(document.get("_geoDistance"), None);
-    }
-
-    #[test]
-    fn test_insert_geo_distance_with_coords_as_string() {
-        let value: Document = serde_json::from_str(
-            r#"{
-              "_geo": {
-                "lat": "50",
-                "lng": 3
-              }
-            }"#,
-        )
-        .unwrap();
-
-        let sorters = &["_geoPoint(50,3):desc".to_string()];
-        let mut document = value.clone();
-        insert_geo_distance(sorters, &mut document);
-        assert_eq!(document.get("_geoDistance"), Some(&json!(0)));
-
-        let value: Document = serde_json::from_str(
-            r#"{
-              "_geo": {
-                "lat": "50",
-                "lng": "3"
-              },
-              "id": "1"
-            }"#,
-        )
-        .unwrap();
-
-        let sorters = &["_geoPoint(50,3):desc".to_string()];
-        let mut document = value.clone();
-        insert_geo_distance(sorters, &mut document);
-        assert_eq!(document.get("_geoDistance"), Some(&json!(0)));
-
-        let value: Document = serde_json::from_str(
-            r#"{
-              "_geo": {
-                "lat": 50,
-                "lng": "3"
-              },
-              "id": "1"
-            }"#,
-        )
-        .unwrap();
-
-        let sorters = &["_geoPoint(50,3):desc".to_string()];
-        let mut document = value.clone();
-        insert_geo_distance(sorters, &mut document);
-        assert_eq!(document.get("_geoDistance"), Some(&json!(0)));
-    }
+    Filter::from_array(ands).map_err(|e| MeilisearchHttpError::from_milli(e, None))
 }

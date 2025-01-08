@@ -1,5 +1,6 @@
 use std::fmt::Display;
 
+use meilisearch_types::batches::BatchId;
 use meilisearch_types::error::{Code, ErrorCode};
 use meilisearch_types::tasks::{Kind, Status};
 use meilisearch_types::{heed, milli};
@@ -79,7 +80,9 @@ pub enum Error {
     )]
     InvalidTaskDate { field: DateField, date: String },
     #[error("Task uid `{task_uid}` is invalid. It should only contain numeric characters.")]
-    InvalidTaskUids { task_uid: String },
+    InvalidTaskUid { task_uid: String },
+    #[error("Batch uid `{batch_uid}` is invalid. It should only contain numeric characters.")]
+    InvalidBatchUid { batch_uid: String },
     #[error(
         "Task status `{status}` is invalid. Available task statuses are {}.",
             enum_iterator::all::<Status>()
@@ -101,11 +104,13 @@ pub enum Error {
     )]
     InvalidTaskCanceledBy { canceled_by: String },
     #[error(
-        "{index_uid} is not a valid index uid. Index uid can be an integer or a string containing only alphanumeric characters, hyphens (-) and underscores (_), and can not be more than 512 bytes."
+        "{index_uid} is not a valid index uid. Index uid can be an integer or a string containing only alphanumeric characters, hyphens (-) and underscores (_), and can not be more than 400 bytes."
     )]
     InvalidIndexUid { index_uid: String },
     #[error("Task `{0}` not found.")]
     TaskNotFound(TaskId),
+    #[error("Batch `{0}` not found.")]
+    BatchNotFound(BatchId),
     #[error("Query parameters to filter the tasks to delete are missing. Available query parameters are: `uids`, `indexUids`, `statuses`, `types`, `canceledBy`, `beforeEnqueuedAt`, `afterEnqueuedAt`, `beforeStartedAt`, `afterStartedAt`, `beforeFinishedAt`, `afterFinishedAt`.")]
     TaskDeletionWithEmptyQuery,
     #[error("Query parameters to filter the tasks to cancel are missing. Available query parameters are: `uids`, `indexUids`, `statuses`, `types`, `canceledBy`, `beforeEnqueuedAt`, `afterEnqueuedAt`, `beforeStartedAt`, `afterStartedAt`, `beforeFinishedAt`, `afterFinishedAt`.")]
@@ -117,8 +122,11 @@ pub enum Error {
     Dump(#[from] dump::Error),
     #[error(transparent)]
     Heed(#[from] heed::Error),
-    #[error(transparent)]
-    Milli(#[from] milli::Error),
+    #[error("{}", match .index_uid {
+        Some(uid) if !uid.is_empty() => format!("Index `{}`: {error}", uid),
+        _ => format!("{error}")
+    })]
+    Milli { error: milli::Error, index_uid: Option<String> },
     #[error("An unexpected crash occurred when processing the task.")]
     ProcessBatchPanicked,
     #[error(transparent)]
@@ -172,18 +180,20 @@ impl Error {
             | Error::SwapIndexesNotFound(_)
             | Error::CorruptedDump
             | Error::InvalidTaskDate { .. }
-            | Error::InvalidTaskUids { .. }
+            | Error::InvalidTaskUid { .. }
+            | Error::InvalidBatchUid { .. }
             | Error::InvalidTaskStatuses { .. }
             | Error::InvalidTaskTypes { .. }
             | Error::InvalidTaskCanceledBy { .. }
             | Error::InvalidIndexUid { .. }
             | Error::TaskNotFound(_)
+            | Error::BatchNotFound(_)
             | Error::TaskDeletionWithEmptyQuery
             | Error::TaskCancelationWithEmptyQuery
             | Error::AbortedTask
             | Error::Dump(_)
             | Error::Heed(_)
-            | Error::Milli(_)
+            | Error::Milli { .. }
             | Error::ProcessBatchPanicked
             | Error::FileStore(_)
             | Error::IoError(_)
@@ -202,6 +212,20 @@ impl Error {
     pub fn with_custom_error_code(self, code: Code) -> Self {
         Self::WithCustomErrorCode(code, Box::new(self))
     }
+
+    pub fn from_milli(err: milli::Error, index_uid: Option<String>) -> Self {
+        match err {
+            milli::Error::UserError(milli::UserError::InvalidFilter(_)) => {
+                Self::Milli { error: err, index_uid }
+                    .with_custom_error_code(Code::InvalidDocumentFilter)
+            }
+            milli::Error::UserError(milli::UserError::InvalidFilterExpression { .. }) => {
+                Self::Milli { error: err, index_uid }
+                    .with_custom_error_code(Code::InvalidDocumentFilter)
+            }
+            _ => Self::Milli { error: err, index_uid },
+        }
+    }
 }
 
 impl ErrorCode for Error {
@@ -216,18 +240,20 @@ impl ErrorCode for Error {
             Error::SwapIndexNotFound(_) => Code::IndexNotFound,
             Error::SwapIndexesNotFound(_) => Code::IndexNotFound,
             Error::InvalidTaskDate { field, .. } => (*field).into(),
-            Error::InvalidTaskUids { .. } => Code::InvalidTaskUids,
+            Error::InvalidTaskUid { .. } => Code::InvalidTaskUids,
+            Error::InvalidBatchUid { .. } => Code::InvalidBatchUids,
             Error::InvalidTaskStatuses { .. } => Code::InvalidTaskStatuses,
             Error::InvalidTaskTypes { .. } => Code::InvalidTaskTypes,
             Error::InvalidTaskCanceledBy { .. } => Code::InvalidTaskCanceledBy,
             Error::InvalidIndexUid { .. } => Code::InvalidIndexUid,
             Error::TaskNotFound(_) => Code::TaskNotFound,
+            Error::BatchNotFound(_) => Code::BatchNotFound,
             Error::TaskDeletionWithEmptyQuery => Code::MissingTaskFilters,
             Error::TaskCancelationWithEmptyQuery => Code::MissingTaskFilters,
             // TODO: not sure of the Code to use
             Error::NoSpaceLeftInTaskQueue => Code::NoSpaceLeftOnDevice,
             Error::Dump(e) => e.error_code(),
-            Error::Milli(e) => e.error_code(),
+            Error::Milli { error, .. } => error.error_code(),
             Error::ProcessBatchPanicked => Code::Internal,
             Error::Heed(e) => e.error_code(),
             Error::HeedTransaction(e) => e.error_code(),

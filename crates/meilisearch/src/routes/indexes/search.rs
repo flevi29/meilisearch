@@ -198,7 +198,7 @@ impl TryFrom<SearchQueryGet> for SearchQuery {
 // TODO: TAMO: split on :asc, and :desc, instead of doing some weird things
 
 /// Transform the sort query parameter into something that matches the post expected format.
-fn fix_sort_query_parameters(sort_query: &str) -> Vec<String> {
+pub fn fix_sort_query_parameters(sort_query: &str) -> Vec<String> {
     let mut sort_parameters = Vec::new();
     let mut merge = false;
     for current_sort in sort_query.trim_matches('"').split(',').map(|s| s.trim()) {
@@ -243,11 +243,19 @@ pub async fn search_with_url_query(
     let index = index_scheduler.index(&index_uid)?;
     let features = index_scheduler.features();
 
-    let search_kind = search_kind(&query, index_scheduler.get_ref(), &index, features)?;
+    let search_kind =
+        search_kind(&query, index_scheduler.get_ref(), index_uid.to_string(), &index, features)?;
     let retrieve_vector = RetrieveVectors::new(query.retrieve_vectors, features)?;
     let permit = search_queue.try_get_search_permit().await?;
     let search_result = tokio::task::spawn_blocking(move || {
-        perform_search(&index, query, search_kind, retrieve_vector, index_scheduler.features())
+        perform_search(
+            index_uid.to_string(),
+            &index,
+            query,
+            search_kind,
+            retrieve_vector,
+            index_scheduler.features(),
+        )
     })
     .await;
     permit.drop().await;
@@ -287,12 +295,20 @@ pub async fn search_with_post(
 
     let features = index_scheduler.features();
 
-    let search_kind = search_kind(&query, index_scheduler.get_ref(), &index, features)?;
+    let search_kind =
+        search_kind(&query, index_scheduler.get_ref(), index_uid.to_string(), &index, features)?;
     let retrieve_vectors = RetrieveVectors::new(query.retrieve_vectors, features)?;
 
     let permit = search_queue.try_get_search_permit().await?;
     let search_result = tokio::task::spawn_blocking(move || {
-        perform_search(&index, query, search_kind, retrieve_vectors, index_scheduler.features())
+        perform_search(
+            index_uid.to_string(),
+            &index,
+            query,
+            search_kind,
+            retrieve_vectors,
+            index_scheduler.features(),
+        )
     })
     .await;
     permit.drop().await;
@@ -314,6 +330,7 @@ pub async fn search_with_post(
 pub fn search_kind(
     query: &SearchQuery,
     index_scheduler: &IndexScheduler,
+    index_uid: String,
     index: &milli::Index,
     features: RoFeatures,
 ) -> Result<SearchKind, ResponseError> {
@@ -332,7 +349,7 @@ pub fn search_kind(
         (None, _, None) => Ok(SearchKind::KeywordOnly),
         // hybrid.semantic_ratio == 1.0 => vector
         (_, Some(HybridQuery { semantic_ratio, embedder }), v) if **semantic_ratio == 1.0 => {
-            SearchKind::semantic(index_scheduler, index, embedder, v.map(|v| v.len()))
+            SearchKind::semantic(index_scheduler, index_uid, index, embedder, v.map(|v| v.len()))
         }
         // hybrid.semantic_ratio == 0.0 => keyword
         (_, Some(HybridQuery { semantic_ratio, embedder: _ }), _) if **semantic_ratio == 0.0 => {
@@ -340,13 +357,14 @@ pub fn search_kind(
         }
         // no query, hybrid, vector => semantic
         (None, Some(HybridQuery { semantic_ratio: _, embedder }), Some(v)) => {
-            SearchKind::semantic(index_scheduler, index, embedder, Some(v.len()))
+            SearchKind::semantic(index_scheduler, index_uid, index, embedder, Some(v.len()))
         }
         // query, no hybrid, no vector => keyword
         (Some(_), None, None) => Ok(SearchKind::KeywordOnly),
         // query, hybrid, maybe vector => hybrid
         (Some(_), Some(HybridQuery { semantic_ratio, embedder }), v) => SearchKind::hybrid(
             index_scheduler,
+            index_uid,
             index,
             embedder,
             **semantic_ratio,
@@ -354,32 +372,5 @@ pub fn search_kind(
         ),
 
         (_, None, Some(_)) => Err(MeilisearchHttpError::MissingSearchHybrid.into()),
-    }
-}
-
-#[cfg(test)]
-mod test {
-    use super::*;
-
-    #[test]
-    fn test_fix_sort_query_parameters() {
-        let sort = fix_sort_query_parameters("_geoPoint(12, 13):asc");
-        assert_eq!(sort, vec!["_geoPoint(12,13):asc".to_string()]);
-        let sort = fix_sort_query_parameters("doggo:asc,_geoPoint(12.45,13.56):desc");
-        assert_eq!(sort, vec!["doggo:asc".to_string(), "_geoPoint(12.45,13.56):desc".to_string(),]);
-        let sort = fix_sort_query_parameters(
-            "doggo:asc , _geoPoint(12.45, 13.56, 2590352):desc , catto:desc",
-        );
-        assert_eq!(
-            sort,
-            vec![
-                "doggo:asc".to_string(),
-                "_geoPoint(12.45,13.56,2590352):desc".to_string(),
-                "catto:desc".to_string(),
-            ]
-        );
-        let sort = fix_sort_query_parameters("doggo:asc , _geoPoint(1, 2), catto:desc");
-        // This is ugly but eh, I don't want to write a full parser just for this unused route
-        assert_eq!(sort, vec!["doggo:asc".to_string(), "_geoPoint(1,2),catto:desc".to_string(),]);
     }
 }

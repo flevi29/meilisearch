@@ -15,7 +15,7 @@ use crate::heed_codec::{BEU16StrCodec, StrRefCodec};
 use crate::localized_attributes_rules::LocalizedFieldIds;
 use crate::update::del_add::{DelAdd, KvReaderDelAdd, KvWriterDelAdd};
 use crate::update::index_documents::helpers::{
-    merge_deladd_btreeset_string, merge_deladd_cbo_roaring_bitmaps,
+    MergeDeladdBtreesetString, MergeDeladdCboRoaringBitmaps,
 };
 use crate::update::settings::InnerIndexSettingsDiff;
 use crate::{FieldId, Result, MAX_FACET_VALUE_LENGTH};
@@ -34,10 +34,12 @@ pub fn extract_facet_string_docids<R: io::Read + io::Seek>(
         extract_facet_string_docids_settings(docid_fid_facet_string, indexer, settings_diff)
     } else {
         let localized_field_ids = &settings_diff.new.localized_faceted_fields_ids;
+        let facet_search = settings_diff.new.facet_search;
         extract_facet_string_docids_document_update(
             docid_fid_facet_string,
             indexer,
             localized_field_ids,
+            facet_search,
         )
     }
 }
@@ -51,31 +53,34 @@ fn extract_facet_string_docids_document_update<R: io::Read + io::Seek>(
     docid_fid_facet_string: grenad::Reader<R>,
     indexer: GrenadParameters,
     localized_field_ids: &LocalizedFieldIds,
+    facet_search: bool,
 ) -> Result<(grenad::Reader<BufReader<File>>, grenad::Reader<BufReader<File>>)> {
     let max_memory = indexer.max_memory_by_thread();
 
     let mut facet_string_docids_sorter = create_sorter(
         grenad::SortAlgorithm::Stable,
-        merge_deladd_cbo_roaring_bitmaps,
+        MergeDeladdCboRoaringBitmaps,
         indexer.chunk_compression_type,
         indexer.chunk_compression_level,
         indexer.max_nb_chunks,
         max_memory.map(|m| m / 2),
+        true,
     );
 
     let mut normalized_facet_string_docids_sorter = create_sorter(
         grenad::SortAlgorithm::Stable,
-        merge_deladd_btreeset_string,
+        MergeDeladdBtreesetString,
         indexer.chunk_compression_type,
         indexer.chunk_compression_level,
         indexer.max_nb_chunks,
         max_memory.map(|m| m / 2),
+        true,
     );
 
     let mut buffer = Vec::new();
     let mut cursor = docid_fid_facet_string.into_cursor()?;
     while let Some((key, deladd_original_value_bytes)) = cursor.move_on_next()? {
-        let deladd_reader = KvReaderDelAdd::new(deladd_original_value_bytes);
+        let deladd_reader = KvReaderDelAdd::from_slice(deladd_original_value_bytes);
 
         let is_same_value = deladd_reader.get(DelAdd::Deletion).is_some()
             && deladd_reader.get(DelAdd::Addition).is_some();
@@ -94,7 +99,7 @@ fn extract_facet_string_docids_document_update<R: io::Read + io::Seek>(
         let normalized_value = str::from_utf8(normalized_value_bytes)?;
 
         // Facet search normalization
-        {
+        if facet_search {
             let locales = localized_field_ids.locales(field_id);
             let hyper_normalized_value = normalize_facet_string(normalized_value, locales);
 
@@ -144,26 +149,28 @@ fn extract_facet_string_docids_settings<R: io::Read + io::Seek>(
 
     let mut facet_string_docids_sorter = create_sorter(
         grenad::SortAlgorithm::Stable,
-        merge_deladd_cbo_roaring_bitmaps,
+        MergeDeladdCboRoaringBitmaps,
         indexer.chunk_compression_type,
         indexer.chunk_compression_level,
         indexer.max_nb_chunks,
         max_memory.map(|m| m / 2),
+        true,
     );
 
     let mut normalized_facet_string_docids_sorter = create_sorter(
         grenad::SortAlgorithm::Stable,
-        merge_deladd_btreeset_string,
+        MergeDeladdBtreesetString,
         indexer.chunk_compression_type,
         indexer.chunk_compression_level,
         indexer.max_nb_chunks,
         max_memory.map(|m| m / 2),
+        true,
     );
 
     let mut buffer = Vec::new();
     let mut cursor = docid_fid_facet_string.into_cursor()?;
     while let Some((key, deladd_original_value_bytes)) = cursor.move_on_next()? {
-        let deladd_reader = KvReaderDelAdd::new(deladd_original_value_bytes);
+        let deladd_reader = KvReaderDelAdd::from_slice(deladd_original_value_bytes);
 
         let is_same_value = deladd_reader.get(DelAdd::Deletion).is_some()
             && deladd_reader.get(DelAdd::Addition).is_some();
@@ -175,8 +182,10 @@ fn extract_facet_string_docids_settings<R: io::Read + io::Seek>(
         let new_locales = settings_diff.new.localized_faceted_fields_ids.locales(field_id);
 
         let are_same_locales = old_locales == new_locales;
+        let reindex_facet_search =
+            settings_diff.new.facet_search && !settings_diff.old.facet_search;
 
-        if is_same_value && are_same_locales {
+        if is_same_value && are_same_locales && !reindex_facet_search {
             continue;
         }
 
@@ -187,18 +196,26 @@ fn extract_facet_string_docids_settings<R: io::Read + io::Seek>(
         let normalized_value = str::from_utf8(normalized_value_bytes)?;
 
         // Facet search normalization
-        {
-            let old_hyper_normalized_value = normalize_facet_string(normalized_value, old_locales);
-            let new_hyper_normalized_value = if are_same_locales {
-                &old_hyper_normalized_value
+        if settings_diff.new.facet_search {
+            let new_hyper_normalized_value = normalize_facet_string(normalized_value, new_locales);
+            let old_hyper_normalized_value;
+            let old_hyper_normalized_value = if !settings_diff.old.facet_search
+                || deladd_reader.get(DelAdd::Deletion).is_none()
+            {
+                // if the facet search is disabled in the old settings or if no facet string is deleted,
+                // we don't need to normalize the facet string.
+                None
+            } else if are_same_locales {
+                Some(&new_hyper_normalized_value)
             } else {
-                &normalize_facet_string(normalized_value, new_locales)
+                old_hyper_normalized_value = normalize_facet_string(normalized_value, old_locales);
+                Some(&old_hyper_normalized_value)
             };
 
             let set = BTreeSet::from_iter(std::iter::once(normalized_value));
 
             // if the facet string is the same, we can put the deletion and addition in the same obkv.
-            if old_hyper_normalized_value == new_hyper_normalized_value.as_str() {
+            if old_hyper_normalized_value == Some(&new_hyper_normalized_value) {
                 // nothing to do if we delete and re-add the value.
                 if is_same_value {
                     continue;
@@ -218,7 +235,7 @@ fn extract_facet_string_docids_settings<R: io::Read + io::Seek>(
             } else {
                 // if the facet string is different, we need to insert the deletion and addition in different obkv because the related key is different.
                 // deletion
-                if deladd_reader.get(DelAdd::Deletion).is_some() {
+                if let Some(old_hyper_normalized_value) = old_hyper_normalized_value {
                     // insert old value
                     let val = SerdeJson::bytes_encode(&set).map_err(heed::Error::Encoding)?;
                     buffer.clear();

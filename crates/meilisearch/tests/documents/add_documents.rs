@@ -293,6 +293,7 @@ async fn add_csv_document() {
     snapshot!(json_string!(response, { ".enqueuedAt" => "[date]", ".startedAt" => "[date]", ".finishedAt" => "[date]", ".duration" => "[duration]" }), @r###"
     {
       "uid": 0,
+      "batchUid": 0,
       "indexUid": "pets",
       "status": "succeeded",
       "type": "documentAdditionOrUpdate",
@@ -357,6 +358,7 @@ async fn add_csv_document_with_types() {
     snapshot!(json_string!(response, { ".enqueuedAt" => "[date]", ".startedAt" => "[date]", ".finishedAt" => "[date]", ".duration" => "[duration]" }), @r###"
     {
       "uid": 0,
+      "batchUid": 0,
       "indexUid": "pets",
       "status": "succeeded",
       "type": "documentAdditionOrUpdate",
@@ -432,6 +434,7 @@ async fn add_csv_document_with_custom_delimiter() {
     snapshot!(json_string!(response, { ".enqueuedAt" => "[date]", ".startedAt" => "[date]", ".finishedAt" => "[date]", ".duration" => "[duration]" }), @r###"
     {
       "uid": 0,
+      "batchUid": 0,
       "indexUid": "pets",
       "status": "succeeded",
       "type": "documentAdditionOrUpdate",
@@ -985,6 +988,7 @@ async fn add_documents_no_index_creation() {
         @r###"
     {
       "uid": 0,
+      "batchUid": 0,
       "indexUid": "test",
       "status": "succeeded",
       "type": "documentAdditionOrUpdate",
@@ -1063,6 +1067,7 @@ async fn document_addition_with_primary_key() {
         @r###"
     {
       "uid": 0,
+      "batchUid": 0,
       "indexUid": "test",
       "status": "succeeded",
       "type": "documentAdditionOrUpdate",
@@ -1111,6 +1116,7 @@ async fn document_addition_with_huge_int_primary_key() {
         @r###"
     {
       "uid": "[uid]",
+      "batchUid": "[batch_uid]",
       "indexUid": "test",
       "status": "succeeded",
       "type": "documentAdditionOrUpdate",
@@ -1183,6 +1189,7 @@ async fn replace_document() {
         @r###"
     {
       "uid": 1,
+      "batchUid": 1,
       "indexUid": "test",
       "status": "succeeded",
       "type": "documentAdditionOrUpdate",
@@ -1257,20 +1264,24 @@ async fn error_add_documents_bad_document_id() {
     let server = Server::new().await;
     let index = server.index("test");
     index.create(Some("docid")).await;
+
+    // unsupported characters
+
     let documents = json!([
         {
             "docid": "foo & bar",
             "content": "foobar"
         }
     ]);
-    index.add_documents(documents, None).await;
-    index.wait_task(1).await;
-    let (response, code) = index.get_task(1).await;
+    let (value, _code) = index.add_documents(documents, None).await;
+    index.wait_task(value.uid()).await;
+    let (response, code) = index.get_task(value.uid()).await;
     snapshot!(code, @"200 OK");
     snapshot!(json_string!(response, { ".duration" => "[duration]", ".enqueuedAt" => "[date]", ".startedAt" => "[date]", ".finishedAt" => "[date]" }),
         @r###"
     {
       "uid": 1,
+      "batchUid": 1,
       "indexUid": "test",
       "status": "failed",
       "type": "documentAdditionOrUpdate",
@@ -1280,7 +1291,81 @@ async fn error_add_documents_bad_document_id() {
         "indexedDocuments": 0
       },
       "error": {
-        "message": "Document identifier `\"foo & bar\"` is invalid. A document identifier can be of type integer or string, only composed of alphanumeric characters (a-z A-Z 0-9), hyphens (-) and underscores (_), and can not be more than 512 bytes.",
+        "message": "Document identifier `\"foo & bar\"` is invalid. A document identifier can be of type integer or string, only composed of alphanumeric characters (a-z A-Z 0-9), hyphens (-) and underscores (_), and can not be more than 511 bytes.",
+        "code": "invalid_document_id",
+        "type": "invalid_request",
+        "link": "https://docs.meilisearch.com/errors#invalid_document_id"
+      },
+      "duration": "[duration]",
+      "enqueuedAt": "[date]",
+      "startedAt": "[date]",
+      "finishedAt": "[date]"
+    }
+    "###);
+
+    // More than 512 bytes
+    let documents = json!([
+        {
+            "docid": "a".repeat(600),
+            "content": "foobar"
+        }
+    ]);
+    let (value, _code) = index.add_documents(documents, None).await;
+    index.wait_task(value.uid()).await;
+    let (response, code) = index.get_task(value.uid()).await;
+    snapshot!(code, @"200 OK");
+    snapshot!(json_string!(response, { ".duration" => "[duration]", ".enqueuedAt" => "[date]", ".startedAt" => "[date]", ".finishedAt" => "[date]" }),
+      @r###"
+    {
+      "uid": 2,
+      "batchUid": 2,
+      "indexUid": "test",
+      "status": "failed",
+      "type": "documentAdditionOrUpdate",
+      "canceledBy": null,
+      "details": {
+        "receivedDocuments": 1,
+        "indexedDocuments": 0
+      },
+      "error": {
+        "message": "Document identifier `\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"` is invalid. A document identifier can be of type integer or string, only composed of alphanumeric characters (a-z A-Z 0-9), hyphens (-) and underscores (_), and can not be more than 511 bytes.",
+        "code": "invalid_document_id",
+        "type": "invalid_request",
+        "link": "https://docs.meilisearch.com/errors#invalid_document_id"
+      },
+      "duration": "[duration]",
+      "enqueuedAt": "[date]",
+      "startedAt": "[date]",
+      "finishedAt": "[date]"
+    }
+    "###);
+
+    // Exactly 512 bytes
+    let documents = json!([
+        {
+            "docid": "a".repeat(512),
+            "content": "foobar"
+        }
+    ]);
+    let (value, _code) = index.add_documents(documents, None).await;
+    index.wait_task(value.uid()).await;
+    let (response, code) = index.get_task(value.uid()).await;
+    snapshot!(code, @"200 OK");
+    snapshot!(json_string!(response, { ".duration" => "[duration]", ".enqueuedAt" => "[date]", ".startedAt" => "[date]", ".finishedAt" => "[date]" }),
+    @r###"
+    {
+      "uid": 3,
+      "batchUid": 3,
+      "indexUid": "test",
+      "status": "failed",
+      "type": "documentAdditionOrUpdate",
+      "canceledBy": null,
+      "details": {
+        "receivedDocuments": 1,
+        "indexedDocuments": 0
+      },
+      "error": {
+        "message": "Document identifier `\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"` is invalid. A document identifier can be of type integer or string, only composed of alphanumeric characters (a-z A-Z 0-9), hyphens (-) and underscores (_), and can not be more than 511 bytes.",
         "code": "invalid_document_id",
         "type": "invalid_request",
         "link": "https://docs.meilisearch.com/errors#invalid_document_id"
@@ -1312,6 +1397,7 @@ async fn error_add_documents_missing_document_id() {
         @r###"
     {
       "uid": 1,
+      "batchUid": 1,
       "indexUid": "test",
       "status": "failed",
       "type": "documentAdditionOrUpdate",
@@ -1335,7 +1421,6 @@ async fn error_add_documents_missing_document_id() {
 }
 
 #[actix_rt::test]
-#[should_panic]
 async fn error_document_field_limit_reached_in_one_document() {
     let server = Server::new().await;
     let index = server.index("test");
@@ -1352,7 +1437,7 @@ async fn error_document_field_limit_reached_in_one_document() {
     let documents = json!([big_object]);
 
     let (response, code) = index.update_documents(documents, Some("id")).await;
-    snapshot!(code, @"500 Internal Server Error");
+    snapshot!(code, @"202 Accepted");
 
     let response = index.wait_task(response.uid()).await;
     snapshot!(code, @"202 Accepted");
@@ -1360,16 +1445,22 @@ async fn error_document_field_limit_reached_in_one_document() {
     snapshot!(response,
         @r###"
     {
-      "uid": 1,
+      "uid": "[uid]",
+      "batchUid": "[batch_uid]",
       "indexUid": "test",
-      "status": "succeeded",
+      "status": "failed",
       "type": "documentAdditionOrUpdate",
       "canceledBy": null,
       "details": {
         "receivedDocuments": 1,
-        "indexedDocuments": 1
+        "indexedDocuments": 0
       },
-      "error": null,
+      "error": {
+        "message": "A document cannot contain more than 65,535 fields.",
+        "code": "max_fields_limit_exceeded",
+        "type": "invalid_request",
+        "link": "https://docs.meilisearch.com/errors#max_fields_limit_exceeded"
+      },
       "duration": "[duration]",
       "enqueuedAt": "[date]",
       "startedAt": "[date]",
@@ -1403,6 +1494,7 @@ async fn error_document_field_limit_reached_over_multiple_documents() {
         @r###"
     {
       "uid": "[uid]",
+      "batchUid": "[batch_uid]",
       "indexUid": "test",
       "status": "succeeded",
       "type": "documentAdditionOrUpdate",
@@ -1437,6 +1529,7 @@ async fn error_document_field_limit_reached_over_multiple_documents() {
         @r###"
     {
       "uid": "[uid]",
+      "batchUid": "[batch_uid]",
       "indexUid": "test",
       "status": "failed",
       "type": "documentAdditionOrUpdate",
@@ -1486,6 +1579,7 @@ async fn error_document_field_limit_reached_in_one_nested_document() {
         @r###"
     {
       "uid": "[uid]",
+      "batchUid": "[batch_uid]",
       "indexUid": "test",
       "status": "succeeded",
       "type": "documentAdditionOrUpdate",
@@ -1529,6 +1623,7 @@ async fn error_document_field_limit_reached_over_multiple_documents_with_nested_
         @r###"
     {
       "uid": "[uid]",
+      "batchUid": "[batch_uid]",
       "indexUid": "test",
       "status": "succeeded",
       "type": "documentAdditionOrUpdate",
@@ -1564,6 +1659,7 @@ async fn error_document_field_limit_reached_over_multiple_documents_with_nested_
         @r###"
     {
       "uid": "[uid]",
+      "batchUid": "[batch_uid]",
       "indexUid": "test",
       "status": "succeeded",
       "type": "documentAdditionOrUpdate",
@@ -1611,6 +1707,7 @@ async fn add_documents_with_geo_field() {
         @r###"
     {
       "uid": 1,
+      "batchUid": 1,
       "indexUid": "doggo",
       "status": "succeeded",
       "type": "documentAdditionOrUpdate",
@@ -1651,6 +1748,7 @@ async fn add_documents_invalid_geo_field() {
         @r###"
     {
       "uid": 2,
+      "batchUid": 2,
       "indexUid": "test",
       "status": "failed",
       "type": "documentAdditionOrUpdate",
@@ -1660,7 +1758,7 @@ async fn add_documents_invalid_geo_field() {
         "indexedDocuments": 0
       },
       "error": {
-        "message": "The `_geo` field in the document with the id: `11` is not an object. Was expecting an object with the `_geo.lat` and `_geo.lng` fields but instead got `\"foobar\"`.",
+        "message": "Index `test`: The `_geo` field in the document with the id: `\"11\"` is not an object. Was expecting an object with the `_geo.lat` and `_geo.lng` fields but instead got `\"foobar\"`.",
         "code": "invalid_document_geo_field",
         "type": "invalid_request",
         "link": "https://docs.meilisearch.com/errors#invalid_document_geo_field"
@@ -1688,6 +1786,7 @@ async fn add_documents_invalid_geo_field() {
         @r###"
     {
       "uid": 3,
+      "batchUid": 3,
       "indexUid": "test",
       "status": "failed",
       "type": "documentAdditionOrUpdate",
@@ -1697,7 +1796,7 @@ async fn add_documents_invalid_geo_field() {
         "indexedDocuments": 0
       },
       "error": {
-        "message": "Could not find latitude nor longitude in the document with the id: `11`. Was expecting `_geo.lat` and `_geo.lng` fields.",
+        "message": "Index `test`: Could not find latitude nor longitude in the document with the id: `\"11\"`. Was expecting `_geo.lat` and `_geo.lng` fields.",
         "code": "invalid_document_geo_field",
         "type": "invalid_request",
         "link": "https://docs.meilisearch.com/errors#invalid_document_geo_field"
@@ -1725,6 +1824,7 @@ async fn add_documents_invalid_geo_field() {
         @r###"
     {
       "uid": 4,
+      "batchUid": 4,
       "indexUid": "test",
       "status": "failed",
       "type": "documentAdditionOrUpdate",
@@ -1734,7 +1834,7 @@ async fn add_documents_invalid_geo_field() {
         "indexedDocuments": 0
       },
       "error": {
-        "message": "Could not find latitude nor longitude in the document with the id: `11`. Was expecting `_geo.lat` and `_geo.lng` fields.",
+        "message": "Index `test`: Could not find latitude nor longitude in the document with the id: `\"11\"`. Was expecting `_geo.lat` and `_geo.lng` fields.",
         "code": "invalid_document_geo_field",
         "type": "invalid_request",
         "link": "https://docs.meilisearch.com/errors#invalid_document_geo_field"
@@ -1762,6 +1862,7 @@ async fn add_documents_invalid_geo_field() {
         @r###"
     {
       "uid": 5,
+      "batchUid": 5,
       "indexUid": "test",
       "status": "failed",
       "type": "documentAdditionOrUpdate",
@@ -1771,7 +1872,7 @@ async fn add_documents_invalid_geo_field() {
         "indexedDocuments": 0
       },
       "error": {
-        "message": "Could not find longitude in the document with the id: `11`. Was expecting a `_geo.lng` field.",
+        "message": "Index `test`: Could not find longitude in the document with the id: `\"11\"`. Was expecting a `_geo.lng` field.",
         "code": "invalid_document_geo_field",
         "type": "invalid_request",
         "link": "https://docs.meilisearch.com/errors#invalid_document_geo_field"
@@ -1799,6 +1900,7 @@ async fn add_documents_invalid_geo_field() {
         @r###"
     {
       "uid": 6,
+      "batchUid": 6,
       "indexUid": "test",
       "status": "failed",
       "type": "documentAdditionOrUpdate",
@@ -1808,7 +1910,7 @@ async fn add_documents_invalid_geo_field() {
         "indexedDocuments": 0
       },
       "error": {
-        "message": "Could not find latitude in the document with the id: `11`. Was expecting a `_geo.lat` field.",
+        "message": "Index `test`: Could not find latitude in the document with the id: `\"11\"`. Was expecting a `_geo.lat` field.",
         "code": "invalid_document_geo_field",
         "type": "invalid_request",
         "link": "https://docs.meilisearch.com/errors#invalid_document_geo_field"
@@ -1836,6 +1938,7 @@ async fn add_documents_invalid_geo_field() {
         @r###"
     {
       "uid": 7,
+      "batchUid": 7,
       "indexUid": "test",
       "status": "failed",
       "type": "documentAdditionOrUpdate",
@@ -1845,7 +1948,7 @@ async fn add_documents_invalid_geo_field() {
         "indexedDocuments": 0
       },
       "error": {
-        "message": "Could not find longitude in the document with the id: `11`. Was expecting a `_geo.lng` field.",
+        "message": "Index `test`: Could not find longitude in the document with the id: `\"11\"`. Was expecting a `_geo.lng` field.",
         "code": "invalid_document_geo_field",
         "type": "invalid_request",
         "link": "https://docs.meilisearch.com/errors#invalid_document_geo_field"
@@ -1873,6 +1976,7 @@ async fn add_documents_invalid_geo_field() {
         @r###"
     {
       "uid": 8,
+      "batchUid": 8,
       "indexUid": "test",
       "status": "failed",
       "type": "documentAdditionOrUpdate",
@@ -1882,7 +1986,7 @@ async fn add_documents_invalid_geo_field() {
         "indexedDocuments": 0
       },
       "error": {
-        "message": "Could not find latitude in the document with the id: `11`. Was expecting a `_geo.lat` field.",
+        "message": "Index `test`: Could not find latitude in the document with the id: `\"11\"`. Was expecting a `_geo.lat` field.",
         "code": "invalid_document_geo_field",
         "type": "invalid_request",
         "link": "https://docs.meilisearch.com/errors#invalid_document_geo_field"
@@ -1910,6 +2014,7 @@ async fn add_documents_invalid_geo_field() {
         @r###"
     {
       "uid": 9,
+      "batchUid": 9,
       "indexUid": "test",
       "status": "failed",
       "type": "documentAdditionOrUpdate",
@@ -1919,7 +2024,7 @@ async fn add_documents_invalid_geo_field() {
         "indexedDocuments": 0
       },
       "error": {
-        "message": "Could not parse latitude nor longitude in the document with the id: `11`. Was expecting finite numbers but instead got `false` and `true`.",
+        "message": "Index `test`: Could not parse latitude nor longitude in the document with the id: `\"11\"`. Was expecting finite numbers but instead got `false` and `true`.",
         "code": "invalid_document_geo_field",
         "type": "invalid_request",
         "link": "https://docs.meilisearch.com/errors#invalid_document_geo_field"
@@ -1947,6 +2052,7 @@ async fn add_documents_invalid_geo_field() {
         @r###"
     {
       "uid": 10,
+      "batchUid": 10,
       "indexUid": "test",
       "status": "failed",
       "type": "documentAdditionOrUpdate",
@@ -1956,7 +2062,7 @@ async fn add_documents_invalid_geo_field() {
         "indexedDocuments": 0
       },
       "error": {
-        "message": "Could not find longitude in the document with the id: `11`. Was expecting a `_geo.lng` field.",
+        "message": "Index `test`: Could not find longitude in the document with the id: `\"11\"`. Was expecting a `_geo.lng` field.",
         "code": "invalid_document_geo_field",
         "type": "invalid_request",
         "link": "https://docs.meilisearch.com/errors#invalid_document_geo_field"
@@ -1984,6 +2090,7 @@ async fn add_documents_invalid_geo_field() {
         @r###"
     {
       "uid": 11,
+      "batchUid": 11,
       "indexUid": "test",
       "status": "failed",
       "type": "documentAdditionOrUpdate",
@@ -1993,7 +2100,7 @@ async fn add_documents_invalid_geo_field() {
         "indexedDocuments": 0
       },
       "error": {
-        "message": "Could not find latitude in the document with the id: `11`. Was expecting a `_geo.lat` field.",
+        "message": "Index `test`: Could not find latitude in the document with the id: `\"11\"`. Was expecting a `_geo.lat` field.",
         "code": "invalid_document_geo_field",
         "type": "invalid_request",
         "link": "https://docs.meilisearch.com/errors#invalid_document_geo_field"
@@ -2021,6 +2128,7 @@ async fn add_documents_invalid_geo_field() {
         @r###"
     {
       "uid": 12,
+      "batchUid": 12,
       "indexUid": "test",
       "status": "failed",
       "type": "documentAdditionOrUpdate",
@@ -2030,7 +2138,7 @@ async fn add_documents_invalid_geo_field() {
         "indexedDocuments": 0
       },
       "error": {
-        "message": "Could not parse latitude nor longitude in the document with the id: `11`. Was expecting finite numbers but instead got `\"doggo\"` and `\"doggo\"`.",
+        "message": "Index `test`: Could not parse latitude nor longitude in the document with the id: `\"11\"`. Was expecting finite numbers but instead got `\"doggo\"` and `\"doggo\"`.",
         "code": "invalid_document_geo_field",
         "type": "invalid_request",
         "link": "https://docs.meilisearch.com/errors#invalid_document_geo_field"
@@ -2058,6 +2166,7 @@ async fn add_documents_invalid_geo_field() {
         @r###"
     {
       "uid": 13,
+      "batchUid": 13,
       "indexUid": "test",
       "status": "failed",
       "type": "documentAdditionOrUpdate",
@@ -2067,7 +2176,7 @@ async fn add_documents_invalid_geo_field() {
         "indexedDocuments": 0
       },
       "error": {
-        "message": "The `_geo` field in the document with the id: `11` contains the following unexpected fields: `{\"doggo\":\"are the best\"}`.",
+        "message": "Index `test`: The `_geo` field in the document with the id: `\"11\"` contains the following unexpected fields: `{\"doggo\":\"are the best\"}`.",
         "code": "invalid_document_geo_field",
         "type": "invalid_request",
         "link": "https://docs.meilisearch.com/errors#invalid_document_geo_field"
@@ -2096,6 +2205,7 @@ async fn add_documents_invalid_geo_field() {
         @r###"
     {
       "uid": 14,
+      "batchUid": 14,
       "indexUid": "test",
       "status": "failed",
       "type": "documentAdditionOrUpdate",
@@ -2105,7 +2215,7 @@ async fn add_documents_invalid_geo_field() {
         "indexedDocuments": 0
       },
       "error": {
-        "message": "Could not parse longitude in the document with the id: `12`. Was expecting a finite number but instead got `null`.",
+        "message": "Index `test`: Could not parse longitude in the document with the id: `\"12\"`. Was expecting a finite number but instead got `null`.",
         "code": "invalid_document_geo_field",
         "type": "invalid_request",
         "link": "https://docs.meilisearch.com/errors#invalid_document_geo_field"
@@ -2132,6 +2242,7 @@ async fn add_documents_invalid_geo_field() {
         @r###"
     {
       "uid": 15,
+      "batchUid": 15,
       "indexUid": "test",
       "status": "failed",
       "type": "documentAdditionOrUpdate",
@@ -2141,7 +2252,7 @@ async fn add_documents_invalid_geo_field() {
         "indexedDocuments": 0
       },
       "error": {
-        "message": "Could not parse latitude in the document with the id: `12`. Was expecting a finite number but instead got `null`.",
+        "message": "Index `test`: Could not parse latitude in the document with the id: `\"12\"`. Was expecting a finite number but instead got `null`.",
         "code": "invalid_document_geo_field",
         "type": "invalid_request",
         "link": "https://docs.meilisearch.com/errors#invalid_document_geo_field"
@@ -2168,6 +2279,7 @@ async fn add_documents_invalid_geo_field() {
         @r###"
     {
       "uid": 16,
+      "batchUid": 16,
       "indexUid": "test",
       "status": "failed",
       "type": "documentAdditionOrUpdate",
@@ -2177,7 +2289,7 @@ async fn add_documents_invalid_geo_field() {
         "indexedDocuments": 0
       },
       "error": {
-        "message": "Could not parse latitude nor longitude in the document with the id: `13`. Was expecting finite numbers but instead got `null` and `null`.",
+        "message": "Index `test`: Could not parse latitude nor longitude in the document with the id: `\"13\"`. Was expecting finite numbers but instead got `null` and `null`.",
         "code": "invalid_document_geo_field",
         "type": "invalid_request",
         "link": "https://docs.meilisearch.com/errors#invalid_document_geo_field"
@@ -2197,7 +2309,7 @@ async fn add_invalid_geo_and_then_settings() {
     let index = server.index("test");
     index.create(Some("id")).await;
 
-    // _geo is not an object
+    // _geo is not a correct object
     let documents = json!([
         {
             "id": "11",
@@ -2210,6 +2322,7 @@ async fn add_invalid_geo_and_then_settings() {
     snapshot!(ret, @r###"
     {
       "uid": "[uid]",
+      "batchUid": "[batch_uid]",
       "indexUid": "test",
       "status": "succeeded",
       "type": "documentAdditionOrUpdate",
@@ -2226,12 +2339,13 @@ async fn add_invalid_geo_and_then_settings() {
     }
     "###);
 
-    let (ret, code) = index.update_settings(json!({"sortableAttributes": ["_geo"]})).await;
+    let (ret, code) = index.update_settings(json!({ "sortableAttributes": ["_geo"] })).await;
     snapshot!(code, @"202 Accepted");
     let ret = index.wait_task(ret.uid()).await;
     snapshot!(ret, @r###"
     {
       "uid": "[uid]",
+      "batchUid": "[batch_uid]",
       "indexUid": "test",
       "status": "failed",
       "type": "settingsUpdate",
@@ -2242,7 +2356,7 @@ async fn add_invalid_geo_and_then_settings() {
         ]
       },
       "error": {
-        "message": "Could not parse latitude in the document with the id: `\"11\"`. Was expecting a finite number but instead got `null`.",
+        "message": "Index `test`: Could not parse latitude in the document with the id: `\"11\"`. Was expecting a finite number but instead got `null`.",
         "code": "invalid_document_geo_field",
         "type": "invalid_request",
         "link": "https://docs.meilisearch.com/errors#invalid_document_geo_field"
@@ -2303,6 +2417,7 @@ async fn error_primary_key_inference() {
     @r###"
     {
       "uid": 0,
+      "batchUid": 0,
       "indexUid": "test",
       "status": "failed",
       "type": "documentAdditionOrUpdate",
@@ -2343,6 +2458,7 @@ async fn error_primary_key_inference() {
     @r###"
     {
       "uid": 1,
+      "batchUid": 1,
       "indexUid": "test",
       "status": "failed",
       "type": "documentAdditionOrUpdate",
@@ -2381,6 +2497,7 @@ async fn error_primary_key_inference() {
     @r###"
     {
       "uid": 2,
+      "batchUid": 2,
       "indexUid": "test",
       "status": "succeeded",
       "type": "documentAdditionOrUpdate",

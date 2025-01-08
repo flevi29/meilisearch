@@ -240,6 +240,7 @@ async fn user_provided_embeddings_error() {
     snapshot!(task, @r###"
     {
       "uid": "[uid]",
+      "batchUid": "[batch_uid]",
       "indexUid": "doggo",
       "status": "failed",
       "type": "documentAdditionOrUpdate",
@@ -249,7 +250,7 @@ async fn user_provided_embeddings_error() {
         "indexedDocuments": 0
       },
       "error": {
-        "message": "Bad embedder configuration in the document with id: `\"0\"`. Missing field `regenerate` inside `.manual`",
+        "message": "Index `doggo`: Bad embedder configuration in the document with id: `0`. Missing field `._vectors.manual.regenerate`\n  - note: `._vectors.manual` must be an array of floats, an array of arrays of floats, or an object with field `regenerate`",
         "code": "invalid_vectors_type",
         "type": "invalid_request",
         "link": "https://docs.meilisearch.com/errors#invalid_vectors_type"
@@ -269,6 +270,7 @@ async fn user_provided_embeddings_error() {
     snapshot!(task, @r###"
     {
       "uid": "[uid]",
+      "batchUid": "[batch_uid]",
       "indexUid": "doggo",
       "status": "failed",
       "type": "documentAdditionOrUpdate",
@@ -278,7 +280,7 @@ async fn user_provided_embeddings_error() {
         "indexedDocuments": 0
       },
       "error": {
-        "message": "Bad embedder configuration in the document with id: `\"0\"`. Missing field `regenerate` inside `.manual`",
+        "message": "Index `doggo`: Bad embedder configuration in the document with id: `0`. Missing field `._vectors.manual.regenerate`\n  - note: `._vectors.manual` must be an array of floats, an array of arrays of floats, or an object with field `regenerate`",
         "code": "invalid_vectors_type",
         "type": "invalid_request",
         "link": "https://docs.meilisearch.com/errors#invalid_vectors_type"
@@ -299,6 +301,7 @@ async fn user_provided_embeddings_error() {
     snapshot!(task, @r###"
     {
       "uid": "[uid]",
+      "batchUid": "[batch_uid]",
       "indexUid": "doggo",
       "status": "failed",
       "type": "documentAdditionOrUpdate",
@@ -308,7 +311,7 @@ async fn user_provided_embeddings_error() {
         "indexedDocuments": 0
       },
       "error": {
-        "message": "Bad embedder configuration in the document with id: `\"0\"`. Invalid value type at `.manual.regenerate`: expected a boolean, but found a string: `\"yes please\"`",
+        "message": "Index `doggo`: Bad embedder configuration in the document with id: `0`. Could not parse `._vectors.manual.regenerate`: invalid type: string \"yes please\", expected a boolean at line 1 column 26",
         "code": "invalid_vectors_type",
         "type": "invalid_request",
         "link": "https://docs.meilisearch.com/errors#invalid_vectors_type"
@@ -320,14 +323,14 @@ async fn user_provided_embeddings_error() {
     }
     "###);
 
-    let documents =
-        json!({"id": 0, "name": "kefir", "_vectors": { "manual": { "embeddings": true }}});
+    let documents = json!({"id": 0, "name": "kefir", "_vectors": { "manual": { "embeddings": true, "regenerate": true }}});
     let (value, code) = index.add_documents(documents, None).await;
     snapshot!(code, @"202 Accepted");
     let task = index.wait_task(value.uid()).await;
     snapshot!(task, @r###"
     {
       "uid": "[uid]",
+      "batchUid": "[batch_uid]",
       "indexUid": "doggo",
       "status": "failed",
       "type": "documentAdditionOrUpdate",
@@ -337,7 +340,7 @@ async fn user_provided_embeddings_error() {
         "indexedDocuments": 0
       },
       "error": {
-        "message": "Bad embedder configuration in the document with id: `\"0\"`. Invalid value type at `.manual.embeddings`: expected null or an array, but found a boolean: `true`",
+        "message": "Index `doggo`: Bad embedder configuration in the document with id: `0`. Invalid value type at `._vectors.manual.embeddings`: expected null or an array, but found a boolean: `true`",
         "code": "invalid_vectors_type",
         "type": "invalid_request",
         "link": "https://docs.meilisearch.com/errors#invalid_vectors_type"
@@ -349,14 +352,14 @@ async fn user_provided_embeddings_error() {
     }
     "###);
 
-    let documents =
-        json!({"id": 0, "name": "kefir", "_vectors": { "manual": { "embeddings": [true] }}});
+    let documents = json!({"id": 0, "name": "kefir", "_vectors": { "manual": { "embeddings": [true], "regenerate": true }}});
     let (value, code) = index.add_documents(documents, None).await;
     snapshot!(code, @"202 Accepted");
     let task = index.wait_task(value.uid()).await;
     snapshot!(task, @r###"
     {
       "uid": "[uid]",
+      "batchUid": "[batch_uid]",
       "indexUid": "doggo",
       "status": "failed",
       "type": "documentAdditionOrUpdate",
@@ -366,7 +369,7 @@ async fn user_provided_embeddings_error() {
         "indexedDocuments": 0
       },
       "error": {
-        "message": "Bad embedder configuration in the document with id: `\"0\"`. Invalid value type at `.manual.embeddings[0]`: expected a number or an array, but found a boolean: `true`",
+        "message": "Index `doggo`: Bad embedder configuration in the document with id: `0`. Invalid value type at `._vectors.manual.embeddings[0]`: expected a number or an array, but found a boolean: `true`",
         "code": "invalid_vectors_type",
         "type": "invalid_request",
         "link": "https://docs.meilisearch.com/errors#invalid_vectors_type"
@@ -378,14 +381,14 @@ async fn user_provided_embeddings_error() {
     }
     "###);
 
-    let documents =
-        json!({"id": 0, "name": "kefir", "_vectors": { "manual": { "embeddings": [[true]] }}});
+    let documents = json!({"id": 0, "name": "kefir", "_vectors": { "manual": { "embeddings": [[true]], "regenerate": false }}});
     let (value, code) = index.add_documents(documents, None).await;
     snapshot!(code, @"202 Accepted");
     let task = index.wait_task(value.uid()).await;
     snapshot!(task, @r###"
     {
       "uid": "[uid]",
+      "batchUid": "[batch_uid]",
       "indexUid": "doggo",
       "status": "failed",
       "type": "documentAdditionOrUpdate",
@@ -395,7 +398,7 @@ async fn user_provided_embeddings_error() {
         "indexedDocuments": 0
       },
       "error": {
-        "message": "Bad embedder configuration in the document with id: `\"0\"`. Invalid value type at `.manual.embeddings[0][0]`: expected a number, but found a boolean: `true`",
+        "message": "Index `doggo`: Bad embedder configuration in the document with id: `0`. Invalid value type at `._vectors.manual.embeddings[0][0]`: expected a number, but found a boolean: `true`",
         "code": "invalid_vectors_type",
         "type": "invalid_request",
         "link": "https://docs.meilisearch.com/errors#invalid_vectors_type"
@@ -427,6 +430,7 @@ async fn user_provided_embeddings_error() {
     snapshot!(task, @r###"
     {
       "uid": "[uid]",
+      "batchUid": "[batch_uid]",
       "indexUid": "doggo",
       "status": "failed",
       "type": "documentAdditionOrUpdate",
@@ -436,7 +440,7 @@ async fn user_provided_embeddings_error() {
         "indexedDocuments": 0
       },
       "error": {
-        "message": "Bad embedder configuration in the document with id: `\"0\"`. Invalid value type at `.manual.embeddings[1]`: expected a number, but found an array: `[0.2,0.3]`",
+        "message": "Index `doggo`: Bad embedder configuration in the document with id: `0`. Invalid value type at `._vectors.manual.embeddings[1]`: expected a number, but found an array: `[0.2,0.3]`",
         "code": "invalid_vectors_type",
         "type": "invalid_request",
         "link": "https://docs.meilisearch.com/errors#invalid_vectors_type"
@@ -455,6 +459,7 @@ async fn user_provided_embeddings_error() {
     snapshot!(task, @r###"
     {
       "uid": "[uid]",
+      "batchUid": "[batch_uid]",
       "indexUid": "doggo",
       "status": "failed",
       "type": "documentAdditionOrUpdate",
@@ -464,7 +469,7 @@ async fn user_provided_embeddings_error() {
         "indexedDocuments": 0
       },
       "error": {
-        "message": "Bad embedder configuration in the document with id: `\"0\"`. Invalid value type at `.manual.embeddings[1]`: expected an array, but found a number: `0.3`",
+        "message": "Index `doggo`: Bad embedder configuration in the document with id: `0`. Invalid value type at `._vectors.manual.embeddings[1]`: expected an array, but found a number: `0.3`",
         "code": "invalid_vectors_type",
         "type": "invalid_request",
         "link": "https://docs.meilisearch.com/errors#invalid_vectors_type"
@@ -483,6 +488,7 @@ async fn user_provided_embeddings_error() {
     snapshot!(task, @r###"
     {
       "uid": "[uid]",
+      "batchUid": "[batch_uid]",
       "indexUid": "doggo",
       "status": "failed",
       "type": "documentAdditionOrUpdate",
@@ -492,7 +498,7 @@ async fn user_provided_embeddings_error() {
         "indexedDocuments": 0
       },
       "error": {
-        "message": "Bad embedder configuration in the document with id: `\"0\"`. Invalid value type at `.manual.embeddings[0][1]`: expected a number, but found a boolean: `true`",
+        "message": "Index `doggo`: Bad embedder configuration in the document with id: `0`. Invalid value type at `._vectors.manual.embeddings[0][1]`: expected a number, but found a boolean: `true`",
         "code": "invalid_vectors_type",
         "type": "invalid_request",
         "link": "https://docs.meilisearch.com/errors#invalid_vectors_type"
@@ -523,6 +529,7 @@ async fn user_provided_vectors_error() {
     snapshot!(task, @r###"
     {
       "uid": "[uid]",
+      "batchUid": "[batch_uid]",
       "indexUid": "doggo",
       "status": "failed",
       "type": "documentAdditionOrUpdate",
@@ -532,7 +539,7 @@ async fn user_provided_vectors_error() {
         "indexedDocuments": 0
       },
       "error": {
-        "message": "While embedding documents for embedder `manual`: no vectors provided for document \"40\" and at least 4 other document(s)\n- Note: `manual` has `source: userProvided`, so documents must provide embeddings as an array in `_vectors.manual`.\n- Hint: opt-out for a document with `_vectors.manual: null`",
+        "message": "Index `doggo`: While embedding documents for embedder `manual`: no vectors provided for document `40` and at least 4 other document(s)\n- Note: `manual` has `source: userProvided`, so documents must provide embeddings as an array in `_vectors.manual`.\n- Hint: opt-out for a document with `_vectors.manual: null`",
         "code": "vector_embedding_error",
         "type": "invalid_request",
         "link": "https://docs.meilisearch.com/errors#vector_embedding_error"
@@ -552,6 +559,7 @@ async fn user_provided_vectors_error() {
     snapshot!(task, @r###"
     {
       "uid": "[uid]",
+      "batchUid": "[batch_uid]",
       "indexUid": "doggo",
       "status": "failed",
       "type": "documentAdditionOrUpdate",
@@ -561,7 +569,7 @@ async fn user_provided_vectors_error() {
         "indexedDocuments": 0
       },
       "error": {
-        "message": "While embedding documents for embedder `manual`: no vectors provided for document \"42\"\n- Note: `manual` has `source: userProvided`, so documents must provide embeddings as an array in `_vectors.manual`.\n- Hint: try replacing `_vector` by `_vectors` in 1 document(s).",
+        "message": "Index `doggo`: While embedding documents for embedder `manual`: no vectors provided for document `42`\n- Note: `manual` has `source: userProvided`, so documents must provide embeddings as an array in `_vectors.manual`.\n- Hint: try replacing `_vector` by `_vectors` in 1 document(s).",
         "code": "vector_embedding_error",
         "type": "invalid_request",
         "link": "https://docs.meilisearch.com/errors#vector_embedding_error"
@@ -581,6 +589,7 @@ async fn user_provided_vectors_error() {
     snapshot!(task, @r###"
     {
       "uid": "[uid]",
+      "batchUid": "[batch_uid]",
       "indexUid": "doggo",
       "status": "failed",
       "type": "documentAdditionOrUpdate",
@@ -590,7 +599,7 @@ async fn user_provided_vectors_error() {
         "indexedDocuments": 0
       },
       "error": {
-        "message": "While embedding documents for embedder `manual`: no vectors provided for document \"42\"\n- Note: `manual` has `source: userProvided`, so documents must provide embeddings as an array in `_vectors.manual`.\n- Hint: try replacing `_vectors.manaul` by `_vectors.manual` in 1 document(s).",
+        "message": "Index `doggo`: While embedding documents for embedder `manual`: no vectors provided for document `42`\n- Note: `manual` has `source: userProvided`, so documents must provide embeddings as an array in `_vectors.manual`.\n- Hint: try replacing `_vectors.manaul` by `_vectors.manual` in 1 document(s).",
         "code": "vector_embedding_error",
         "type": "invalid_request",
         "link": "https://docs.meilisearch.com/errors#vector_embedding_error"

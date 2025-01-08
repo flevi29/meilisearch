@@ -73,7 +73,7 @@ enum Command {
     ///
     /// Supported upgrade paths:
     ///
-    /// - v1.9.x -> v1.10.x -> v1.11.x
+    /// - v1.9.x -> v1.10.x -> v1.11.x -> v1.12.x
     OfflineUpgrade {
         #[arg(long)]
         target_version: String,
@@ -264,7 +264,7 @@ fn export_a_dump(
                         format!("While iterating on content file {:?}", content_file_uuid)
                     })? {
                         dump_content_file
-                            .push_document(&obkv_to_object(&doc, &documents_batch_index)?)?;
+                            .push_document(&obkv_to_object(doc, &documents_batch_index)?)?;
                     }
                     dump_content_file.flush()?;
                     count += 1;

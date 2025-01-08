@@ -1,11 +1,15 @@
 mod adjust_indexes;
 mod best_match_range;
 
-use std::cmp::{max, min};
+use std::{
+    borrow::Cow,
+    cmp::{max, min},
+};
 
 use super::{
     matching_words::QueryPosition,
     r#match::{Match, MatchPosition},
+    MarkerOptions,
 };
 
 use adjust_indexes::{
@@ -16,6 +20,7 @@ use serde::Serialize;
 
 use super::FormatOptions;
 
+// TODO: https://github.com/meilisearch/meilisearch/pull/5005/files
 #[derive(Serialize, Debug, Clone, PartialEq, Eq)]
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum MatchBounds {
@@ -23,7 +28,7 @@ pub enum MatchBounds {
     Formatted { highlight_toggle: bool, indexes: Vec<usize> },
 }
 
-pub struct MatchBoundsHelper<'a> {
+struct MatchBoundsHelper<'a> {
     tokens: &'a [Token<'a>],
     matches: &'a [Match],
     query_positions: &'a [QueryPosition],
@@ -237,34 +242,80 @@ impl MatchBoundsHelper<'_> {
     }
 }
 
-pub fn get_match_bounds(
-    tokens: &[Token],
-    matches: &[Match],
-    query_positions: &[QueryPosition],
-    format_options: FormatOptions,
-) -> MatchBounds {
-    let mbh = MatchBoundsHelper { tokens, matches, query_positions };
+impl MatchBounds {
+    pub fn new(
+        tokens: &[Token],
+        matches: &[Match],
+        query_positions: &[QueryPosition],
+        array_indices: &[usize],
+        format_options: FormatOptions,
+    ) -> Self {
+        let mbh = MatchBoundsHelper { tokens, matches, query_positions };
 
-    if let Some(crop_size) = format_options.crop.filter(|v| *v != 0) {
-        if matches.is_empty() {
-            return mbh.get_crop_bounds_with_no_matches(crop_size);
+        if let Some(crop_size) = format_options.crop.filter(|v| *v != 0) {
+            if matches.is_empty() {
+                return mbh.get_crop_bounds_with_no_matches(crop_size);
+            }
+
+            if format_options.highlight {
+                return mbh.get_crop_and_highlight_bounds(crop_size);
+            }
+
+            return mbh.get_crop_bounds_with_matches(crop_size);
         }
 
-        if format_options.highlight {
-            return mbh.get_crop_and_highlight_bounds(crop_size);
+        if format_options.highlight && !matches.is_empty() {
+            mbh.get_match_bounds(MatchesAndCropIndexes {
+                matches_first_index: 0,
+                matches_last_index: matches.len() - 1,
+                crop_byte_start: 0,
+                crop_byte_end: tokens[tokens.len() - 1].byte_end,
+            })
+        } else {
+            Self::Full
         }
-
-        return mbh.get_crop_bounds_with_matches(crop_size);
     }
 
-    if format_options.highlight && !matches.is_empty() {
-        mbh.get_match_bounds(MatchesAndCropIndexes {
-            matches_first_index: 0,
-            matches_last_index: matches.len() - 1,
-            crop_byte_start: 0,
-            crop_byte_end: tokens[tokens.len() - 1].byte_end,
-        })
-    } else {
-        MatchBounds::Full
+    pub fn to_formatted_text<'a>(&self, text: &'a str, options: &MarkerOptions) -> Cow<'a, str> {
+        let Self::Formatted { mut highlight_toggle, indexes } = self else {
+            return Cow::Borrowed(text);
+        };
+
+        let mut formatted_text = Vec::new();
+
+        let mut indexes_iter = indexes.iter();
+        let mut previous_index = indexes_iter.next().expect("TODO");
+
+        // push crop marker if it's not the start of the text
+        if !options.crop_marker.is_empty() && *previous_index != 0 {
+            formatted_text.push(options.crop_marker.as_str());
+        }
+
+        for index in indexes_iter {
+            if highlight_toggle {
+                formatted_text.push(options.highlight_pre_tag.as_str());
+            }
+
+            formatted_text.push(&text[*previous_index..*index]);
+
+            if highlight_toggle {
+                formatted_text.push(options.highlight_post_tag.as_str());
+            }
+
+            highlight_toggle = !highlight_toggle;
+            previous_index = index;
+        }
+
+        // push crop marker if it's not the end of the text
+        if !options.crop_marker.is_empty() && *previous_index < text.len() {
+            formatted_text.push(options.crop_marker.as_str());
+        }
+
+        if formatted_text.len() == 1 {
+            // avoid concatenating if there is only one element
+            return Cow::Owned(formatted_text[0].to_string());
+        }
+
+        Cow::Owned(formatted_text.concat())
     }
 }

@@ -1,6 +1,7 @@
 #![cfg_attr(all(test, fuzzing), feature(no_coverage))]
 #![allow(clippy::type_complexity)]
 
+#[cfg(not(windows))]
 #[cfg(test)]
 #[global_allocator]
 pub static ALLOC: mimalloc::MiMalloc = mimalloc::MiMalloc;
@@ -30,6 +31,7 @@ pub mod vector;
 #[macro_use]
 pub mod snapshot_tests;
 mod fieldids_weights_map;
+pub mod progress;
 
 use std::collections::{BTreeMap, HashMap};
 use std::convert::{TryFrom, TryInto};
@@ -55,7 +57,7 @@ pub use self::error::{
 };
 pub use self::external_documents_ids::ExternalDocumentsIds;
 pub use self::fieldids_weights_map::FieldidsWeightsMap;
-pub use self::fields_ids_map::FieldsIdsMap;
+pub use self::fields_ids_map::{FieldsIdsMap, GlobalFieldsIdsMap};
 pub use self::heed_codec::{
     BEU16StrCodec, BEU32StrCodec, BoRoaringBitmapCodec, BoRoaringBitmapLenCodec,
     CboRoaringBitmapCodec, CboRoaringBitmapLenCodec, FieldIdWordCountCodec, ObkvCodec,
@@ -68,8 +70,9 @@ use self::localized_attributes_rules::LocalizedFieldIds;
 pub use self::search::facet::{FacetValueHit, SearchForFacetValues};
 pub use self::search::similar::Similar;
 pub use self::search::{
-    FacetDistribution, Filter, FormatOptions, MatchBounds, MatcherBuilder, MatchingWords, OrderBy,
-    Search, SearchResult, SemanticSearch, TermsMatchingStrategy, DEFAULT_VALUES_PER_FACET,
+    FacetDistribution, Filter, FormatOptions, MarkerOptions, MatchBounds, MatcherBuilder,
+    MatchingWords, OrderBy, Search, SearchResult, SemanticSearch, TermsMatchingStrategy,
+    DEFAULT_VALUES_PER_FACET,
 };
 
 pub type Result<T> = std::result::Result<T, error::Error>;
@@ -88,6 +91,7 @@ pub type Object = serde_json::Map<String, serde_json::Value>;
 pub type Position = u32;
 pub type RelativePosition = u16;
 pub type SmallString32 = smallstr::SmallString<[u8; 32]>;
+pub type Prefix = smallstr::SmallString<[u8; 16]>;
 pub type SmallVec16<T> = smallvec::SmallVec<[T; 16]>;
 pub type SmallVec32<T> = smallvec::SmallVec<[T; 32]>;
 pub type SmallVec8<T> = smallvec::SmallVec<[T; 8]>;
@@ -214,7 +218,7 @@ pub fn bucketed_position(relative: u16) -> u16 {
 pub fn obkv_to_json(
     displayed_fields: &[FieldId],
     fields_ids_map: &FieldsIdsMap,
-    obkv: obkv::KvReaderU16<'_>,
+    obkv: &obkv::KvReaderU16,
 ) -> Result<Object> {
     displayed_fields
         .iter()
@@ -232,10 +236,7 @@ pub fn obkv_to_json(
 }
 
 /// Transform every field of a raw obkv store into a JSON Object.
-pub fn all_obkv_to_json(
-    obkv: obkv::KvReaderU16<'_>,
-    fields_ids_map: &FieldsIdsMap,
-) -> Result<Object> {
+pub fn all_obkv_to_json(obkv: &obkv::KvReaderU16, fields_ids_map: &FieldsIdsMap) -> Result<Object> {
     let all_keys = obkv.iter().map(|(k, _v)| k).collect::<Vec<_>>();
     obkv_to_json(all_keys.as_slice(), fields_ids_map, obkv)
 }
@@ -434,7 +435,7 @@ mod tests {
         writer.insert(id1, b"1234").unwrap();
         writer.insert(id2, b"4321").unwrap();
         let contents = writer.into_inner().unwrap();
-        let obkv = obkv::KvReaderU16::new(&contents);
+        let obkv = obkv::KvReaderU16::from_slice(&contents);
 
         let expected = json!({
             "field1": 1234,

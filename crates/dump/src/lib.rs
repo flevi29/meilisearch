@@ -1,6 +1,7 @@
 #![allow(clippy::type_complexity)]
 #![allow(clippy::wrong_self_convention)]
 
+use meilisearch_types::batches::BatchId;
 use meilisearch_types::error::ResponseError;
 use meilisearch_types::keys::Key;
 use meilisearch_types::milli::update::IndexDocumentsMethod;
@@ -57,6 +58,9 @@ pub enum Version {
 #[serde(rename_all = "camelCase")]
 pub struct TaskDump {
     pub uid: TaskId,
+    // The batch ID were introduced in v1.12, everything prior to this version will be `None`.
+    #[serde(default)]
+    pub batch_uid: Option<BatchId>,
     #[serde(default)]
     pub index_uid: Option<String>,
     pub status: Status,
@@ -143,6 +147,7 @@ impl From<Task> for TaskDump {
     fn from(task: Task) -> Self {
         TaskDump {
             uid: task.uid,
+            batch_uid: task.batch_uid,
             index_uid: task.index_uid().map(|uid| uid.to_string()),
             status: task.status,
             kind: task.kind.into(),
@@ -287,6 +292,8 @@ pub(crate) mod test {
             embedders: Setting::NotSet,
             search_cutoff_ms: Setting::NotSet,
             localized_attributes: Setting::NotSet,
+            facet_search: Setting::NotSet,
+            prefix_search: Setting::NotSet,
             _kind: std::marker::PhantomData,
         };
         settings.check()
@@ -297,6 +304,7 @@ pub(crate) mod test {
             (
                 TaskDump {
                     uid: 0,
+                    batch_uid: Some(0),
                     index_uid: Some(S("doggo")),
                     status: Status::Succeeded,
                     kind: KindDump::DocumentImport {
@@ -320,6 +328,7 @@ pub(crate) mod test {
             (
                 TaskDump {
                     uid: 1,
+                    batch_uid: None,
                     index_uid: Some(S("doggo")),
                     status: Status::Enqueued,
                     kind: KindDump::DocumentImport {
@@ -346,6 +355,7 @@ pub(crate) mod test {
             (
                 TaskDump {
                     uid: 5,
+                    batch_uid: None,
                     index_uid: Some(S("catto")),
                     status: Status::Enqueued,
                     kind: KindDump::IndexDeletion,

@@ -1,18 +1,13 @@
-use anyhow::bail;
 use std::path::Path;
 
-use anyhow::Context;
-use meilisearch_types::{
-    heed::{
-        types::{SerdeJson, Str},
-        Database, Env, EnvOpenOptions, RoTxn, RwTxn, Unspecified,
-    },
-    milli::index::{db_name, main_key},
-};
-
-use crate::{try_opening_database, try_opening_poly_database, uuid_codec::UuidCodec};
+use anyhow::{bail, Context};
+use meilisearch_types::heed::types::{SerdeJson, Str};
+use meilisearch_types::heed::{Database, Env, EnvOpenOptions, RoTxn, RwTxn, Unspecified};
+use meilisearch_types::milli::index::{db_name, main_key};
 
 use super::v1_9;
+use crate::uuid_codec::UuidCodec;
+use crate::{try_opening_database, try_opening_poly_database};
 
 pub type FieldDistribution = std::collections::BTreeMap<String, u64>;
 
@@ -75,13 +70,6 @@ fn update_index_stats(
     sched_wtxn: &mut RwTxn,
 ) -> anyhow::Result<()> {
     let ctx = || format!("while updating index stats for index `{index_uid}`");
-
-    let stats: Option<&str> = index_stats
-        .remap_data_type::<Str>()
-        .get(sched_wtxn, &index_uuid)
-        .with_context(ctx)
-        .with_context(|| "While reading value")?;
-    dbg!(stats);
 
     let stats: Option<v1_9::IndexStats> = index_stats
         .remap_data_type::<SerdeJson<v1_9::IndexStats>>()

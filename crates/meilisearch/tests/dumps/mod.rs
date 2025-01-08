@@ -79,7 +79,9 @@ async fn import_dump_v1_movie_raw() {
         "maxTotalHits": 1000
       },
       "searchCutoffMs": null,
-      "localizedAttributes": null
+      "localizedAttributes": null,
+      "facetSearch": true,
+      "prefixSearch": "indexingTime"
     }
     "###
     );
@@ -88,7 +90,7 @@ async fn import_dump_v1_movie_raw() {
     snapshot!(code, @"200 OK");
     assert_eq!(
         tasks,
-        json!({ "results": [{"uid": 0, "indexUid": "indexUID", "status": "succeeded", "type": "documentAdditionOrUpdate", "canceledBy": null, "details": { "receivedDocuments": 0, "indexedDocuments": 31968 }, "error": null, "duration": "PT9.317060500S", "enqueuedAt": "2021-09-08T09:08:45.153219Z", "startedAt": "2021-09-08T09:08:45.3961665Z", "finishedAt": "2021-09-08T09:08:54.713227Z" }], "total": 1,  "limit": 20, "from": 0, "next": null })
+        json!({ "results": [{"uid": 0, "batchUid": null, "indexUid": "indexUID", "status": "succeeded", "type": "documentAdditionOrUpdate", "canceledBy": null, "details": { "receivedDocuments": 0, "indexedDocuments": 31968 }, "error": null, "duration": "PT9.317060500S", "enqueuedAt": "2021-09-08T09:08:45.153219Z", "startedAt": "2021-09-08T09:08:45.3961665Z", "finishedAt": "2021-09-08T09:08:54.713227Z" }], "total": 1,  "limit": 20, "from": 0, "next": null })
     );
 
     // finally we're just going to check that we can still get a few documents by id
@@ -242,7 +244,9 @@ async fn import_dump_v1_movie_with_settings() {
         "maxTotalHits": 1000
       },
       "searchCutoffMs": null,
-      "localizedAttributes": null
+      "localizedAttributes": null,
+      "facetSearch": true,
+      "prefixSearch": "indexingTime"
     }
     "###
     );
@@ -251,7 +255,7 @@ async fn import_dump_v1_movie_with_settings() {
     snapshot!(code, @"200 OK");
     assert_eq!(
         tasks,
-        json!({ "results": [{ "uid": 1, "indexUid": "indexUID", "status": "succeeded", "type": "settingsUpdate", "canceledBy": null, "details": { "displayedAttributes": ["genres", "id", "overview", "poster", "release_date", "title"], "searchableAttributes": ["title", "overview"], "filterableAttributes": ["genres"], "sortableAttributes": ["genres"], "stopWords": ["of", "the"] }, "error": null, "duration": "PT7.288826907S", "enqueuedAt": "2021-09-08T09:34:40.882977Z", "startedAt": "2021-09-08T09:34:40.883073093Z", "finishedAt": "2021-09-08T09:34:48.1719Z"}, { "uid": 0, "indexUid": "indexUID", "status": "succeeded", "type": "documentAdditionOrUpdate", "canceledBy": null, "details": { "receivedDocuments": 0, "indexedDocuments": 31968 }, "error": null, "duration": "PT9.090735774S", "enqueuedAt": "2021-09-08T09:34:16.036101Z", "startedAt": "2021-09-08T09:34:16.261191226Z", "finishedAt": "2021-09-08T09:34:25.351927Z" }], "total": 2, "limit": 20, "from": 1, "next": null })
+        json!({ "results": [{ "uid": 1, "batchUid": null, "indexUid": "indexUID", "status": "succeeded", "type": "settingsUpdate", "canceledBy": null, "details": { "displayedAttributes": ["genres", "id", "overview", "poster", "release_date", "title"], "searchableAttributes": ["title", "overview"], "filterableAttributes": ["genres"], "sortableAttributes": ["genres"], "stopWords": ["of", "the"] }, "error": null, "duration": "PT7.288826907S", "enqueuedAt": "2021-09-08T09:34:40.882977Z", "startedAt": "2021-09-08T09:34:40.883073093Z", "finishedAt": "2021-09-08T09:34:48.1719Z"}, { "uid": 0, "batchUid": null, "indexUid": "indexUID", "status": "succeeded", "type": "documentAdditionOrUpdate", "canceledBy": null, "details": { "receivedDocuments": 0, "indexedDocuments": 31968 }, "error": null, "duration": "PT9.090735774S", "enqueuedAt": "2021-09-08T09:34:16.036101Z", "startedAt": "2021-09-08T09:34:16.261191226Z", "finishedAt": "2021-09-08T09:34:25.351927Z" }], "total": 2, "limit": 20, "from": 1, "next": null })
     );
 
     // finally we're just going to check that we can still get a few documents by id
@@ -391,7 +395,9 @@ async fn import_dump_v1_rubygems_with_settings() {
         "maxTotalHits": 1000
       },
       "searchCutoffMs": null,
-      "localizedAttributes": null
+      "localizedAttributes": null,
+      "facetSearch": true,
+      "prefixSearch": "indexingTime"
     }
     "###
     );
@@ -400,7 +406,7 @@ async fn import_dump_v1_rubygems_with_settings() {
     snapshot!(code, @"200 OK");
     assert_eq!(
         tasks["results"][0],
-        json!({"uid": 92, "indexUid": "rubygems", "status": "succeeded", "type": "documentAdditionOrUpdate", "canceledBy": null, "details": {"receivedDocuments": 0, "indexedDocuments": 1042}, "error": null, "duration": "PT1.487793839S", "enqueuedAt": "2021-09-08T09:27:01.465296Z", "startedAt": "2021-09-08T09:28:44.882177161Z", "finishedAt": "2021-09-08T09:28:46.369971Z"})
+        json!({"uid": 92, "batchUid": null, "indexUid": "rubygems", "status": "succeeded", "type": "documentAdditionOrUpdate", "canceledBy": null, "details": {"receivedDocuments": 0, "indexedDocuments": 1042}, "error": null, "duration": "PT1.487793839S", "enqueuedAt": "2021-09-08T09:27:01.465296Z", "startedAt": "2021-09-08T09:28:44.882177161Z", "finishedAt": "2021-09-08T09:28:46.369971Z"})
     );
 
     // finally we're just going to check that we can still get a few documents by id
@@ -526,7 +532,9 @@ async fn import_dump_v2_movie_raw() {
         "maxTotalHits": 1000
       },
       "searchCutoffMs": null,
-      "localizedAttributes": null
+      "localizedAttributes": null,
+      "facetSearch": true,
+      "prefixSearch": "indexingTime"
     }
     "###
     );
@@ -535,7 +543,7 @@ async fn import_dump_v2_movie_raw() {
     snapshot!(code, @"200 OK");
     assert_eq!(
         tasks,
-        json!({ "results": [{"uid": 0, "indexUid": "indexUID", "status": "succeeded", "type": "documentAdditionOrUpdate", "canceledBy": null, "details": { "receivedDocuments": 0, "indexedDocuments": 31944 }, "error": null, "duration": "PT41.751156S", "enqueuedAt": "2021-09-08T08:30:30.550282Z", "startedAt": "2021-09-08T08:30:30.553012Z", "finishedAt": "2021-09-08T08:31:12.304168Z" }], "total": 1, "limit": 20, "from": 0, "next": null })
+        json!({ "results": [{"uid": 0, "batchUid": null, "indexUid": "indexUID", "status": "succeeded", "type": "documentAdditionOrUpdate", "canceledBy": null, "details": { "receivedDocuments": 0, "indexedDocuments": 31944 }, "error": null, "duration": "PT41.751156S", "enqueuedAt": "2021-09-08T08:30:30.550282Z", "startedAt": "2021-09-08T08:30:30.553012Z", "finishedAt": "2021-09-08T08:31:12.304168Z" }], "total": 1, "limit": 20, "from": 0, "next": null })
     );
 
     // finally we're just going to check that we can still get a few documents by id
@@ -673,7 +681,9 @@ async fn import_dump_v2_movie_with_settings() {
         "maxTotalHits": 1000
       },
       "searchCutoffMs": null,
-      "localizedAttributes": null
+      "localizedAttributes": null,
+      "facetSearch": true,
+      "prefixSearch": "indexingTime"
     }
     "###
     );
@@ -682,7 +692,7 @@ async fn import_dump_v2_movie_with_settings() {
     snapshot!(code, @"200 OK");
     assert_eq!(
         tasks,
-        json!({ "results": [{ "uid": 1, "indexUid": "indexUID", "status": "succeeded", "type": "settingsUpdate", "canceledBy": null, "details": { "displayedAttributes": ["title", "genres", "overview", "poster", "release_date"], "searchableAttributes": ["title", "overview"], "filterableAttributes": ["genres"], "stopWords": ["of", "the"] }, "error": null, "duration": "PT37.488777S", "enqueuedAt": "2021-09-08T08:24:02.323444Z", "startedAt": "2021-09-08T08:24:02.324145Z", "finishedAt": "2021-09-08T08:24:39.812922Z" }, { "uid": 0, "indexUid": "indexUID", "status": "succeeded", "type": "documentAdditionOrUpdate", "canceledBy": null, "details": { "receivedDocuments": 0, "indexedDocuments": 31944 }, "error": null, "duration": "PT39.941318S", "enqueuedAt": "2021-09-08T08:21:14.742672Z", "startedAt": "2021-09-08T08:21:14.750166Z", "finishedAt": "2021-09-08T08:21:54.691484Z" }], "total": 2, "limit": 20, "from": 1, "next": null })
+        json!({ "results": [{ "uid": 1, "batchUid": null, "indexUid": "indexUID", "status": "succeeded", "type": "settingsUpdate", "canceledBy": null, "details": { "displayedAttributes": ["title", "genres", "overview", "poster", "release_date"], "searchableAttributes": ["title", "overview"], "filterableAttributes": ["genres"], "stopWords": ["of", "the"] }, "error": null, "duration": "PT37.488777S", "enqueuedAt": "2021-09-08T08:24:02.323444Z", "startedAt": "2021-09-08T08:24:02.324145Z", "finishedAt": "2021-09-08T08:24:39.812922Z" }, { "uid": 0, "batchUid": null, "indexUid": "indexUID", "status": "succeeded", "type": "documentAdditionOrUpdate", "canceledBy": null, "details": { "receivedDocuments": 0, "indexedDocuments": 31944 }, "error": null, "duration": "PT39.941318S", "enqueuedAt": "2021-09-08T08:21:14.742672Z", "startedAt": "2021-09-08T08:21:14.750166Z", "finishedAt": "2021-09-08T08:21:54.691484Z" }], "total": 2, "limit": 20, "from": 1, "next": null })
     );
 
     // finally we're just going to check that we can still get a few documents by id
@@ -819,7 +829,9 @@ async fn import_dump_v2_rubygems_with_settings() {
         "maxTotalHits": 1000
       },
       "searchCutoffMs": null,
-      "localizedAttributes": null
+      "localizedAttributes": null,
+      "facetSearch": true,
+      "prefixSearch": "indexingTime"
     }
     "###
     );
@@ -828,7 +840,7 @@ async fn import_dump_v2_rubygems_with_settings() {
     snapshot!(code, @"200 OK");
     assert_eq!(
         tasks["results"][0],
-        json!({"uid": 92, "indexUid": "rubygems", "status": "succeeded", "type": "documentAdditionOrUpdate", "canceledBy": null, "details": {"receivedDocuments": 0, "indexedDocuments": 1042}, "error": null, "duration": "PT14.034672S", "enqueuedAt": "2021-09-08T08:40:31.390775Z", "startedAt": "2021-09-08T08:51:39.060642Z", "finishedAt": "2021-09-08T08:51:53.095314Z"})
+        json!({"uid": 92, "batchUid": null, "indexUid": "rubygems", "status": "succeeded", "type": "documentAdditionOrUpdate", "canceledBy": null, "details": {"receivedDocuments": 0, "indexedDocuments": 1042}, "error": null, "duration": "PT14.034672S", "enqueuedAt": "2021-09-08T08:40:31.390775Z", "startedAt": "2021-09-08T08:51:39.060642Z", "finishedAt": "2021-09-08T08:51:53.095314Z"})
     );
 
     // finally we're just going to check that we can still get a few documents by id
@@ -954,7 +966,9 @@ async fn import_dump_v3_movie_raw() {
         "maxTotalHits": 1000
       },
       "searchCutoffMs": null,
-      "localizedAttributes": null
+      "localizedAttributes": null,
+      "facetSearch": true,
+      "prefixSearch": "indexingTime"
     }
     "###
     );
@@ -963,7 +977,7 @@ async fn import_dump_v3_movie_raw() {
     snapshot!(code, @"200 OK");
     assert_eq!(
         tasks,
-        json!({ "results": [{"uid": 0, "indexUid": "indexUID", "status": "succeeded", "type": "documentAdditionOrUpdate", "canceledBy": null, "details": { "receivedDocuments": 0, "indexedDocuments": 31944 }, "error": null, "duration": "PT41.751156S", "enqueuedAt": "2021-09-08T08:30:30.550282Z", "startedAt": "2021-09-08T08:30:30.553012Z", "finishedAt": "2021-09-08T08:31:12.304168Z" }], "total": 1, "limit": 20, "from": 0, "next": null })
+        json!({ "results": [{"uid": 0, "batchUid": null, "indexUid": "indexUID", "status": "succeeded", "type": "documentAdditionOrUpdate", "canceledBy": null, "details": { "receivedDocuments": 0, "indexedDocuments": 31944 }, "error": null, "duration": "PT41.751156S", "enqueuedAt": "2021-09-08T08:30:30.550282Z", "startedAt": "2021-09-08T08:30:30.553012Z", "finishedAt": "2021-09-08T08:31:12.304168Z" }], "total": 1, "limit": 20, "from": 0, "next": null })
     );
 
     // finally we're just going to check that we can still get a few documents by id
@@ -1101,7 +1115,9 @@ async fn import_dump_v3_movie_with_settings() {
         "maxTotalHits": 1000
       },
       "searchCutoffMs": null,
-      "localizedAttributes": null
+      "localizedAttributes": null,
+      "facetSearch": true,
+      "prefixSearch": "indexingTime"
     }
     "###
     );
@@ -1110,7 +1126,7 @@ async fn import_dump_v3_movie_with_settings() {
     snapshot!(code, @"200 OK");
     assert_eq!(
         tasks,
-        json!({ "results": [{ "uid": 1, "indexUid": "indexUID", "status": "succeeded", "type": "settingsUpdate", "canceledBy": null, "details": { "displayedAttributes": ["title", "genres", "overview", "poster", "release_date"], "searchableAttributes": ["title", "overview"], "filterableAttributes": ["genres"], "stopWords": ["of", "the"] }, "error": null, "duration": "PT37.488777S", "enqueuedAt": "2021-09-08T08:24:02.323444Z", "startedAt": "2021-09-08T08:24:02.324145Z", "finishedAt": "2021-09-08T08:24:39.812922Z" }, { "uid": 0, "indexUid": "indexUID", "status": "succeeded", "type": "documentAdditionOrUpdate", "canceledBy": null, "details": { "receivedDocuments": 0, "indexedDocuments": 31944 }, "error": null, "duration": "PT39.941318S", "enqueuedAt": "2021-09-08T08:21:14.742672Z", "startedAt": "2021-09-08T08:21:14.750166Z", "finishedAt": "2021-09-08T08:21:54.691484Z" }], "total": 2, "limit": 20, "from": 1, "next": null })
+        json!({ "results": [{ "uid": 1, "batchUid": null, "indexUid": "indexUID", "status": "succeeded", "type": "settingsUpdate", "canceledBy": null, "details": { "displayedAttributes": ["title", "genres", "overview", "poster", "release_date"], "searchableAttributes": ["title", "overview"], "filterableAttributes": ["genres"], "stopWords": ["of", "the"] }, "error": null, "duration": "PT37.488777S", "enqueuedAt": "2021-09-08T08:24:02.323444Z", "startedAt": "2021-09-08T08:24:02.324145Z", "finishedAt": "2021-09-08T08:24:39.812922Z" }, { "uid": 0, "batchUid": null, "indexUid": "indexUID", "status": "succeeded", "type": "documentAdditionOrUpdate", "canceledBy": null, "details": { "receivedDocuments": 0, "indexedDocuments": 31944 }, "error": null, "duration": "PT39.941318S", "enqueuedAt": "2021-09-08T08:21:14.742672Z", "startedAt": "2021-09-08T08:21:14.750166Z", "finishedAt": "2021-09-08T08:21:54.691484Z" }], "total": 2, "limit": 20, "from": 1, "next": null })
     );
 
     // finally we're just going to check that we can["results"] still get a few documents by id
@@ -1247,7 +1263,9 @@ async fn import_dump_v3_rubygems_with_settings() {
         "maxTotalHits": 1000
       },
       "searchCutoffMs": null,
-      "localizedAttributes": null
+      "localizedAttributes": null,
+      "facetSearch": true,
+      "prefixSearch": "indexingTime"
     }
     "###
     );
@@ -1256,7 +1274,7 @@ async fn import_dump_v3_rubygems_with_settings() {
     snapshot!(code, @"200 OK");
     assert_eq!(
         tasks["results"][0],
-        json!({"uid": 92, "indexUid": "rubygems", "status": "succeeded", "type": "documentAdditionOrUpdate", "canceledBy": null, "details": {"receivedDocuments": 0, "indexedDocuments": 1042}, "error": null, "duration": "PT14.034672S", "enqueuedAt": "2021-09-08T08:40:31.390775Z", "startedAt": "2021-09-08T08:51:39.060642Z", "finishedAt": "2021-09-08T08:51:53.095314Z"})
+        json!({"uid": 92, "batchUid": null, "indexUid": "rubygems", "status": "succeeded", "type": "documentAdditionOrUpdate", "canceledBy": null, "details": {"receivedDocuments": 0, "indexedDocuments": 1042}, "error": null, "duration": "PT14.034672S", "enqueuedAt": "2021-09-08T08:40:31.390775Z", "startedAt": "2021-09-08T08:51:39.060642Z", "finishedAt": "2021-09-08T08:51:53.095314Z"})
     );
 
     // finally we're just going to check that we can still get a few documents by id
@@ -1382,7 +1400,9 @@ async fn import_dump_v4_movie_raw() {
         "maxTotalHits": 1000
       },
       "searchCutoffMs": null,
-      "localizedAttributes": null
+      "localizedAttributes": null,
+      "facetSearch": true,
+      "prefixSearch": "indexingTime"
     }
     "###
     );
@@ -1391,7 +1411,7 @@ async fn import_dump_v4_movie_raw() {
     snapshot!(code, @"200 OK");
     assert_eq!(
         tasks,
-        json!({ "results": [{"uid": 0, "indexUid": "indexUID", "status": "succeeded", "type": "documentAdditionOrUpdate", "canceledBy": null, "details": { "receivedDocuments": 0, "indexedDocuments": 31944 }, "error": null, "duration": "PT41.751156S", "enqueuedAt": "2021-09-08T08:30:30.550282Z", "startedAt": "2021-09-08T08:30:30.553012Z", "finishedAt": "2021-09-08T08:31:12.304168Z" }], "total": 1, "limit" : 20, "from": 0, "next": null })
+        json!({ "results": [{"uid": 0, "batchUid": null, "indexUid": "indexUID", "status": "succeeded", "type": "documentAdditionOrUpdate", "canceledBy": null, "details": { "receivedDocuments": 0, "indexedDocuments": 31944 }, "error": null, "duration": "PT41.751156S", "enqueuedAt": "2021-09-08T08:30:30.550282Z", "startedAt": "2021-09-08T08:30:30.553012Z", "finishedAt": "2021-09-08T08:31:12.304168Z" }], "total": 1, "limit" : 20, "from": 0, "next": null })
     );
 
     // finally we're just going to check that we can still get a few documents by id
@@ -1529,7 +1549,9 @@ async fn import_dump_v4_movie_with_settings() {
         "maxTotalHits": 1000
       },
       "searchCutoffMs": null,
-      "localizedAttributes": null
+      "localizedAttributes": null,
+      "facetSearch": true,
+      "prefixSearch": "indexingTime"
     }
     "###
     );
@@ -1538,7 +1560,7 @@ async fn import_dump_v4_movie_with_settings() {
     snapshot!(code, @"200 OK");
     assert_eq!(
         tasks,
-        json!({ "results": [{ "uid": 1, "indexUid": "indexUID", "status": "succeeded", "type": "settingsUpdate", "canceledBy": null, "details": { "displayedAttributes": ["title", "genres", "overview", "poster", "release_date"], "searchableAttributes": ["title", "overview"], "filterableAttributes": ["genres"], "stopWords": ["of", "the"] }, "error": null, "duration": "PT37.488777S", "enqueuedAt": "2021-09-08T08:24:02.323444Z", "startedAt": "2021-09-08T08:24:02.324145Z", "finishedAt": "2021-09-08T08:24:39.812922Z" }, { "uid": 0, "indexUid": "indexUID", "status": "succeeded", "type": "documentAdditionOrUpdate", "canceledBy": null, "details": { "receivedDocuments": 0, "indexedDocuments": 31944 }, "error": null, "duration": "PT39.941318S", "enqueuedAt": "2021-09-08T08:21:14.742672Z", "startedAt": "2021-09-08T08:21:14.750166Z", "finishedAt": "2021-09-08T08:21:54.691484Z" }], "total": 2, "limit": 20, "from": 1, "next": null })
+        json!({ "results": [{ "uid": 1, "batchUid": null, "indexUid": "indexUID", "status": "succeeded", "type": "settingsUpdate", "canceledBy": null, "details": { "displayedAttributes": ["title", "genres", "overview", "poster", "release_date"], "searchableAttributes": ["title", "overview"], "filterableAttributes": ["genres"], "stopWords": ["of", "the"] }, "error": null, "duration": "PT37.488777S", "enqueuedAt": "2021-09-08T08:24:02.323444Z", "startedAt": "2021-09-08T08:24:02.324145Z", "finishedAt": "2021-09-08T08:24:39.812922Z" }, { "uid": 0, "batchUid": null, "indexUid": "indexUID", "status": "succeeded", "type": "documentAdditionOrUpdate", "canceledBy": null, "details": { "receivedDocuments": 0, "indexedDocuments": 31944 }, "error": null, "duration": "PT39.941318S", "enqueuedAt": "2021-09-08T08:21:14.742672Z", "startedAt": "2021-09-08T08:21:14.750166Z", "finishedAt": "2021-09-08T08:21:54.691484Z" }], "total": 2, "limit": 20, "from": 1, "next": null })
     );
 
     // finally we're just going to check that we can still get a few documents by id
@@ -1675,7 +1697,9 @@ async fn import_dump_v4_rubygems_with_settings() {
         "maxTotalHits": 1000
       },
       "searchCutoffMs": null,
-      "localizedAttributes": null
+      "localizedAttributes": null,
+      "facetSearch": true,
+      "prefixSearch": "indexingTime"
     }
     "###
     );
@@ -1684,7 +1708,7 @@ async fn import_dump_v4_rubygems_with_settings() {
     snapshot!(code, @"200 OK");
     assert_eq!(
         tasks["results"][0],
-        json!({ "uid": 92, "indexUid": "rubygems", "status": "succeeded", "type": "documentAdditionOrUpdate", "canceledBy": null, "details": {"receivedDocuments": 0, "indexedDocuments": 1042}, "error": null, "duration": "PT14.034672S", "enqueuedAt": "2021-09-08T08:40:31.390775Z", "startedAt": "2021-09-08T08:51:39.060642Z", "finishedAt": "2021-09-08T08:51:53.095314Z"})
+        json!({ "uid": 92, "batchUid": null, "indexUid": "rubygems", "status": "succeeded", "type": "documentAdditionOrUpdate", "canceledBy": null, "details": {"receivedDocuments": 0, "indexedDocuments": 1042}, "error": null, "duration": "PT14.034672S", "enqueuedAt": "2021-09-08T08:40:31.390775Z", "startedAt": "2021-09-08T08:51:39.060642Z", "finishedAt": "2021-09-08T08:51:53.095314Z"})
     );
 
     // finally we're just going to check that we can still get a few documents by id
@@ -1922,7 +1946,9 @@ async fn import_dump_v6_containing_experimental_features() {
         "maxTotalHits": 1000
       },
       "searchCutoffMs": null,
-      "localizedAttributes": null
+      "localizedAttributes": null,
+      "facetSearch": true,
+      "prefixSearch": "indexingTime"
     }
     "###);
 
@@ -2102,7 +2128,9 @@ async fn generate_and_import_dump_containing_vectors() {
         }
       },
       "searchCutoffMs": null,
-      "localizedAttributes": null
+      "localizedAttributes": null,
+      "facetSearch": true,
+      "prefixSearch": "indexingTime"
     }
     "###);
 

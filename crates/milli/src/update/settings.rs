@@ -17,7 +17,8 @@ use super::IndexerConfig;
 use crate::criterion::Criterion;
 use crate::error::UserError;
 use crate::index::{
-    IndexEmbeddingConfig, DEFAULT_MIN_WORD_LEN_ONE_TYPO, DEFAULT_MIN_WORD_LEN_TWO_TYPOS,
+    IndexEmbeddingConfig, PrefixSearch, DEFAULT_MIN_WORD_LEN_ONE_TYPO,
+    DEFAULT_MIN_WORD_LEN_TWO_TYPOS,
 };
 use crate::order_by_map::OrderByMap;
 use crate::prompt::default_max_bytes;
@@ -96,6 +97,14 @@ impl<T> Setting<T> {
         }
     }
 
+    /// Returns other if self is not set.
+    pub fn or(self, other: Self) -> Self {
+        match self {
+            Setting::Set(_) | Setting::Reset => self,
+            Setting::NotSet => other,
+        }
+    }
+
     /// Returns `true` if applying the new setting changed this setting
     pub fn apply(&mut self, new: Self) -> bool
     where
@@ -169,6 +178,8 @@ pub struct Settings<'a, 't, 'i> {
     embedder_settings: Setting<BTreeMap<String, Setting<EmbeddingSettings>>>,
     search_cutoff: Setting<u64>,
     localized_attributes_rules: Setting<Vec<LocalizedAttributesRule>>,
+    prefix_search: Setting<PrefixSearch>,
+    facet_search: Setting<bool>,
 }
 
 impl<'a, 't, 'i> Settings<'a, 't, 'i> {
@@ -204,6 +215,8 @@ impl<'a, 't, 'i> Settings<'a, 't, 'i> {
             embedder_settings: Setting::NotSet,
             search_cutoff: Setting::NotSet,
             localized_attributes_rules: Setting::NotSet,
+            prefix_search: Setting::NotSet,
+            facet_search: Setting::NotSet,
             indexer_config,
         }
     }
@@ -408,6 +421,22 @@ impl<'a, 't, 'i> Settings<'a, 't, 'i> {
 
     pub fn reset_localized_attributes_rules(&mut self) {
         self.localized_attributes_rules = Setting::Reset;
+    }
+
+    pub fn set_prefix_search(&mut self, value: PrefixSearch) {
+        self.prefix_search = Setting::Set(value);
+    }
+
+    pub fn reset_prefix_search(&mut self) {
+        self.prefix_search = Setting::Reset;
+    }
+
+    pub fn set_facet_search(&mut self, value: bool) {
+        self.facet_search = Setting::Set(value);
+    }
+
+    pub fn reset_facet_search(&mut self) {
+        self.facet_search = Setting::Reset;
     }
 
     #[tracing::instrument(
@@ -936,10 +965,46 @@ impl<'a, 't, 'i> Settings<'a, 't, 'i> {
                     false
                 } else {
                     self.index.put_proximity_precision(self.wtxn, new)?;
-                    true
+                    old.is_some() || new != ProximityPrecision::default()
                 }
             }
             Setting::Reset => self.index.delete_proximity_precision(self.wtxn)?,
+            Setting::NotSet => false,
+        };
+
+        Ok(changed)
+    }
+
+    fn update_prefix_search(&mut self) -> Result<bool> {
+        let changed = match self.prefix_search {
+            Setting::Set(new) => {
+                let old = self.index.prefix_search(self.wtxn)?;
+                if old == Some(new) {
+                    false
+                } else {
+                    self.index.put_prefix_search(self.wtxn, new)?;
+                    old.is_some() || new != PrefixSearch::default()
+                }
+            }
+            Setting::Reset => self.index.delete_prefix_search(self.wtxn)?,
+            Setting::NotSet => false,
+        };
+
+        Ok(changed)
+    }
+
+    fn update_facet_search(&mut self) -> Result<bool> {
+        let changed = match self.facet_search {
+            Setting::Set(new) => {
+                let old = self.index.facet_search(self.wtxn)?;
+                if old == new {
+                    false
+                } else {
+                    self.index.put_facet_search(self.wtxn, new)?;
+                    true
+                }
+            }
+            Setting::Reset => self.index.delete_facet_search(self.wtxn)?,
             Setting::NotSet => false,
         };
 
@@ -1169,7 +1234,7 @@ impl<'a, 't, 'i> Settings<'a, 't, 'i> {
     {
         self.index.set_updated_at(self.wtxn, &OffsetDateTime::now_utc())?;
 
-        let old_inner_settings = InnerIndexSettings::from_index(self.index, self.wtxn)?;
+        let old_inner_settings = InnerIndexSettings::from_index(self.index, self.wtxn, None)?;
 
         // never trigger re-indexing
         self.update_displayed()?;
@@ -1195,11 +1260,13 @@ impl<'a, 't, 'i> Settings<'a, 't, 'i> {
         self.update_searchable()?;
         self.update_exact_attributes()?;
         self.update_proximity_precision()?;
+        self.update_prefix_search()?;
+        self.update_facet_search()?;
         self.update_localized_attributes_rules()?;
 
         let embedding_config_updates = self.update_embedding_configs()?;
 
-        let mut new_inner_settings = InnerIndexSettings::from_index(self.index, self.wtxn)?;
+        let mut new_inner_settings = InnerIndexSettings::from_index(self.index, self.wtxn, None)?;
         new_inner_settings.recompute_facets(self.wtxn, self.index)?;
 
         let primary_key_id = self
@@ -1274,6 +1341,7 @@ impl InnerIndexSettingsDiff {
                 || old_settings.allowed_separators != new_settings.allowed_separators
                 || old_settings.dictionary != new_settings.dictionary
                 || old_settings.proximity_precision != new_settings.proximity_precision
+                || old_settings.prefix_search != new_settings.prefix_search
                 || old_settings.localized_searchable_fields_ids
                     != new_settings.localized_searchable_fields_ids
         };
@@ -1364,7 +1432,7 @@ impl InnerIndexSettingsDiff {
         }
     }
 
-    pub fn reindex_facets(&self) -> bool {
+    pub fn facet_fids_changed(&self) -> bool {
         let existing_fields = &self.new.existing_fields;
         if existing_fields.iter().any(|field| field.contains('.')) {
             return true;
@@ -1384,7 +1452,15 @@ impl InnerIndexSettingsDiff {
         }
 
         (existing_fields - old_faceted_fields) != (existing_fields - new_faceted_fields)
-            || self.old.localized_faceted_fields_ids != self.new.localized_faceted_fields_ids
+    }
+
+    pub fn global_facet_settings_changed(&self) -> bool {
+        self.old.localized_faceted_fields_ids != self.new.localized_faceted_fields_ids
+            || self.old.facet_search != self.new.facet_search
+    }
+
+    pub fn reindex_facets(&self) -> bool {
+        self.facet_fids_changed() || self.global_facet_settings_changed()
     }
 
     pub fn reindex_vectors(&self) -> bool {
@@ -1424,10 +1500,16 @@ pub(crate) struct InnerIndexSettings {
     pub non_faceted_fields_ids: Vec<FieldId>,
     pub localized_searchable_fields_ids: LocalizedFieldIds,
     pub localized_faceted_fields_ids: LocalizedFieldIds,
+    pub prefix_search: PrefixSearch,
+    pub facet_search: bool,
 }
 
 impl InnerIndexSettings {
-    pub fn from_index(index: &Index, rtxn: &heed::RoTxn<'_>) -> Result<Self> {
+    pub fn from_index(
+        index: &Index,
+        rtxn: &heed::RoTxn<'_>,
+        embedding_configs: Option<EmbeddingConfigs>,
+    ) -> Result<Self> {
         let stop_words = index.stop_words(rtxn)?;
         let stop_words = stop_words.map(|sw| sw.map_data(Vec::from).unwrap());
         let allowed_separators = index.allowed_separators(rtxn)?;
@@ -1441,7 +1523,12 @@ impl InnerIndexSettings {
         let mut faceted_fields_ids = index.faceted_fields_ids(rtxn)?;
         let exact_attributes = index.exact_attributes_ids(rtxn)?;
         let proximity_precision = index.proximity_precision(rtxn)?.unwrap_or_default();
-        let embedding_configs = embedders(index.embedding_configs(rtxn)?)?;
+        let embedding_configs = match embedding_configs {
+            Some(embedding_configs) => embedding_configs,
+            None => embedders(index.embedding_configs(rtxn)?)?,
+        };
+        let prefix_search = index.prefix_search(rtxn)?.unwrap_or_default();
+        let facet_search = index.facet_search(rtxn)?;
         let existing_fields: HashSet<_> = index
             .field_distribution(rtxn)?
             .into_iter()
@@ -1499,6 +1586,8 @@ impl InnerIndexSettings {
             non_faceted_fields_ids: vectors_fids.clone(),
             localized_searchable_fields_ids,
             localized_faceted_fields_ids,
+            prefix_search,
+            facet_search,
         })
     }
 
@@ -1905,8 +1994,7 @@ mod tests {
 
     #[test]
     fn mixup_searchable_with_displayed_fields() {
-        let mut index = TempIndex::new();
-        index.index_documents_config.autogenerate_docids = true;
+        let index = TempIndex::new();
 
         let mut wtxn = index.write_txn().unwrap();
         // First we send 3 documents with ids from 1 to 3.
@@ -1914,9 +2002,9 @@ mod tests {
             .add_documents_using_wtxn(
                 &mut wtxn,
                 documents!([
-                    { "name": "kevin", "age": 23},
-                    { "name": "kevina", "age": 21 },
-                    { "name": "benoit", "age": 34 }
+                    { "id": 0, "name": "kevin", "age": 23},
+                    { "id": 1, "name": "kevina", "age": 21 },
+                    { "id": 2, "name": "benoit", "age": 34 }
                 ]),
             )
             .unwrap();
@@ -1952,15 +2040,14 @@ mod tests {
 
     #[test]
     fn default_displayed_fields() {
-        let mut index = TempIndex::new();
-        index.index_documents_config.autogenerate_docids = true;
+        let index = TempIndex::new();
 
         // First we send 3 documents with ids from 1 to 3.
         index
             .add_documents(documents!([
-                { "name": "kevin", "age": 23},
-                { "name": "kevina", "age": 21 },
-                { "name": "benoit", "age": 34 }
+                { "id": 0, "name": "kevin", "age": 23},
+                { "id": 1, "name": "kevina", "age": 21 },
+                { "id": 2, "name": "benoit", "age": 34 }
             ]))
             .unwrap();
 
@@ -1972,17 +2059,16 @@ mod tests {
 
     #[test]
     fn set_and_reset_displayed_field() {
-        let mut index = TempIndex::new();
-        index.index_documents_config.autogenerate_docids = true;
+        let index = TempIndex::new();
 
         let mut wtxn = index.write_txn().unwrap();
         index
             .add_documents_using_wtxn(
                 &mut wtxn,
                 documents!([
-                    { "name": "kevin", "age": 23},
-                    { "name": "kevina", "age": 21 },
-                    { "name": "benoit", "age": 34 }
+                    { "id": 0, "name": "kevin", "age": 23},
+                    { "id": 1, "name": "kevina", "age": 21 },
+                    { "id": 2, "name": "benoit", "age": 34 }
                 ]),
             )
             .unwrap();
@@ -2014,8 +2100,7 @@ mod tests {
 
     #[test]
     fn set_filterable_fields() {
-        let mut index = TempIndex::new();
-        index.index_documents_config.autogenerate_docids = true;
+        let index = TempIndex::new();
 
         // Set the filterable fields to be the age.
         index
@@ -2027,9 +2112,9 @@ mod tests {
         // Then index some documents.
         index
             .add_documents(documents!([
-                { "name": "kevin", "age": 23},
-                { "name": "kevina", "age": 21 },
-                { "name": "benoit", "age": 34 }
+                { "id": 0, "name": "kevin", "age": 23},
+                { "id": 1, "name": "kevina", "age": 21 },
+                { "id": 2, "name": "benoit", "age": 34 }
             ]))
             .unwrap();
 
@@ -2049,8 +2134,8 @@ mod tests {
         let count = index
             .facet_id_f64_docids
             .remap_key_type::<Bytes>()
-            // The faceted field id is 1u16
-            .prefix_iter(&rtxn, &[0, 1, 0])
+            // The faceted field id is 2u16
+            .prefix_iter(&rtxn, &[0, 2, 0])
             .unwrap()
             .count();
         assert_eq!(count, 3);
@@ -2059,9 +2144,9 @@ mod tests {
         // Index a little more documents with new and current facets values.
         index
             .add_documents(documents!([
-                { "name": "kevin2", "age": 23},
-                { "name": "kevina2", "age": 21 },
-                { "name": "benoit", "age": 35 }
+                { "id": 3, "name": "kevin2", "age": 23},
+                { "id": 4, "name": "kevina2", "age": 21 },
+                { "id": 5, "name": "benoit", "age": 35 }
             ]))
             .unwrap();
 
@@ -2070,7 +2155,7 @@ mod tests {
         let count = index
             .facet_id_f64_docids
             .remap_key_type::<Bytes>()
-            .prefix_iter(&rtxn, &[0, 1, 0])
+            .prefix_iter(&rtxn, &[0, 2, 0])
             .unwrap()
             .count();
         assert_eq!(count, 4);
@@ -2088,21 +2173,21 @@ mod tests {
         assert_eq!(fields_ids, hashset! { S("age"),  S("name") });
 
         let rtxn = index.read_txn().unwrap();
-        // Only count the field_id 0 and level 0 facet values.
+        // Only count the field_id 2 and level 0 facet values.
         let count = index
             .facet_id_f64_docids
             .remap_key_type::<Bytes>()
-            .prefix_iter(&rtxn, &[0, 1, 0])
+            .prefix_iter(&rtxn, &[0, 2, 0])
             .unwrap()
             .count();
         assert_eq!(count, 4);
 
         let rtxn = index.read_txn().unwrap();
-        // Only count the field_id 0 and level 0 facet values.
+        // Only count the field_id 1 and level 0 facet values.
         let count = index
             .facet_id_string_docids
             .remap_key_type::<Bytes>()
-            .prefix_iter(&rtxn, &[0, 0])
+            .prefix_iter(&rtxn, &[0, 1])
             .unwrap()
             .count();
         assert_eq!(count, 5);
@@ -2120,21 +2205,21 @@ mod tests {
         assert_eq!(fields_ids, hashset! { S("name") });
 
         let rtxn = index.read_txn().unwrap();
-        // Only count the field_id 0 and level 0 facet values.
+        // Only count the field_id 2 and level 0 facet values.
         let count = index
             .facet_id_f64_docids
             .remap_key_type::<Bytes>()
-            .prefix_iter(&rtxn, &[0, 1, 0])
+            .prefix_iter(&rtxn, &[0, 2, 0])
             .unwrap()
             .count();
         assert_eq!(count, 0);
 
         let rtxn = index.read_txn().unwrap();
-        // Only count the field_id 0 and level 0 facet values.
+        // Only count the field_id 1 and level 0 facet values.
         let count = index
             .facet_id_string_docids
             .remap_key_type::<Bytes>()
-            .prefix_iter(&rtxn, &[0, 0])
+            .prefix_iter(&rtxn, &[0, 1])
             .unwrap()
             .count();
         assert_eq!(count, 5);
@@ -2142,8 +2227,7 @@ mod tests {
 
     #[test]
     fn set_asc_desc_field() {
-        let mut index = TempIndex::new();
-        index.index_documents_config.autogenerate_docids = true;
+        let index = TempIndex::new();
 
         // Set the filterable fields to be the age.
         index
@@ -2156,9 +2240,9 @@ mod tests {
         // Then index some documents.
         index
             .add_documents(documents!([
-                { "name": "kevin", "age": 23},
-                { "name": "kevina", "age": 21 },
-                { "name": "benoit", "age": 34 }
+                { "id": 0, "name": "kevin", "age": 23},
+                { "id": 1, "name": "kevina", "age": 21 },
+                { "id": 2, "name": "benoit", "age": 34 }
             ]))
             .unwrap();
 
@@ -2180,8 +2264,7 @@ mod tests {
 
     #[test]
     fn set_distinct_field() {
-        let mut index = TempIndex::new();
-        index.index_documents_config.autogenerate_docids = true;
+        let index = TempIndex::new();
 
         // Set the filterable fields to be the age.
         index
@@ -2195,13 +2278,13 @@ mod tests {
         // Then index some documents.
         index
             .add_documents(documents!([
-                { "name": "kevin",  "age": 23 },
-                { "name": "kevina", "age": 21 },
-                { "name": "benoit", "age": 34 },
-                { "name": "bernard", "age": 34 },
-                { "name": "bertrand", "age": 34 },
-                { "name": "bernie", "age": 34 },
-                { "name": "ben", "age": 34 }
+                { "id": 0, "name": "kevin",  "age": 23 },
+                { "id": 1, "name": "kevina", "age": 21 },
+                { "id": 2, "name": "benoit", "age": 34 },
+                { "id": 3, "name": "bernard", "age": 34 },
+                { "id": 4, "name": "bertrand", "age": 34 },
+                { "id": 5, "name": "bernie", "age": 34 },
+                { "id": 6, "name": "ben", "age": 34 }
             ]))
             .unwrap();
 
@@ -2215,8 +2298,7 @@ mod tests {
 
     #[test]
     fn set_nested_distinct_field() {
-        let mut index = TempIndex::new();
-        index.index_documents_config.autogenerate_docids = true;
+        let index = TempIndex::new();
 
         // Set the filterable fields to be the age.
         index
@@ -2230,13 +2312,13 @@ mod tests {
         // Then index some documents.
         index
             .add_documents(documents!([
-                { "person": { "name": "kevin", "age": 23 }},
-                { "person": { "name": "kevina", "age": 21 }},
-                { "person": { "name": "benoit", "age": 34 }},
-                { "person": { "name": "bernard", "age": 34 }},
-                { "person": { "name": "bertrand", "age": 34 }},
-                { "person": { "name": "bernie", "age": 34 }},
-                { "person": { "name": "ben", "age": 34 }}
+                { "id": 0, "person": { "name": "kevin", "age": 23 }},
+                { "id": 1, "person": { "name": "kevina", "age": 21 }},
+                { "id": 2, "person": { "name": "benoit", "age": 34 }},
+                { "id": 3, "person": { "name": "bernard", "age": 34 }},
+                { "id": 4, "person": { "name": "bertrand", "age": 34 }},
+                { "id": 5, "person": { "name": "bernie", "age": 34 }},
+                { "id": 6, "person": { "name": "ben", "age": 34 }}
             ]))
             .unwrap();
 
@@ -2250,15 +2332,14 @@ mod tests {
 
     #[test]
     fn default_stop_words() {
-        let mut index = TempIndex::new();
-        index.index_documents_config.autogenerate_docids = true;
+        let index = TempIndex::new();
 
         // First we send 3 documents with ids from 1 to 3.
         index
             .add_documents(documents!([
-                { "name": "kevin", "age": 23},
-                { "name": "kevina", "age": 21 },
-                { "name": "benoit", "age": 34 }
+                { "id": 0, "name": "kevin", "age": 23},
+                { "id": 1, "name": "kevina", "age": 21 },
+                { "id": 2, "name": "benoit", "age": 34 }
             ]))
             .unwrap();
 
@@ -2270,8 +2351,7 @@ mod tests {
 
     #[test]
     fn set_and_reset_stop_words() {
-        let mut index = TempIndex::new();
-        index.index_documents_config.autogenerate_docids = true;
+        let index = TempIndex::new();
 
         let mut wtxn = index.write_txn().unwrap();
         // First we send 3 documents with ids from 1 to 3.
@@ -2279,9 +2359,9 @@ mod tests {
             .add_documents_using_wtxn(
                 &mut wtxn,
                 documents!([
-                    { "name": "kevin", "age": 23, "maxim": "I love dogs" },
-                    { "name": "kevina", "age": 21, "maxim": "Doggos are the best" },
-                    { "name": "benoit", "age": 34, "maxim": "The crepes are really good" },
+                    { "id": 0, "name": "kevin", "age": 23, "maxim": "I love dogs" },
+                    { "id": 1, "name": "kevina", "age": 21, "maxim": "Doggos are the best" },
+                    { "id": 2, "name": "benoit", "age": 34, "maxim": "The crepes are really good" },
                 ]),
             )
             .unwrap();
@@ -2347,8 +2427,7 @@ mod tests {
 
     #[test]
     fn set_and_reset_synonyms() {
-        let mut index = TempIndex::new();
-        index.index_documents_config.autogenerate_docids = true;
+        let index = TempIndex::new();
 
         let mut wtxn = index.write_txn().unwrap();
         // Send 3 documents with ids from 1 to 3.
@@ -2356,9 +2435,9 @@ mod tests {
             .add_documents_using_wtxn(
                 &mut wtxn,
                 documents!([
-                    { "name": "kevin", "age": 23, "maxim": "I love dogs"},
-                    { "name": "kevina", "age": 21, "maxim": "Doggos are the best"},
-                    { "name": "benoit", "age": 34, "maxim": "The crepes are really good"},
+                    { "id": 0, "name": "kevin", "age": 23, "maxim": "I love dogs"},
+                    { "id": 1, "name": "kevina", "age": 21, "maxim": "Doggos are the best"},
+                    { "id": 2, "name": "benoit", "age": 34, "maxim": "The crepes are really good"},
                 ]),
             )
             .unwrap();
@@ -2411,8 +2490,7 @@ mod tests {
 
     #[test]
     fn thai_synonyms() {
-        let mut index = TempIndex::new();
-        index.index_documents_config.autogenerate_docids = true;
+        let index = TempIndex::new();
 
         let mut wtxn = index.write_txn().unwrap();
         // Send 3 documents with ids from 1 to 3.
@@ -2420,8 +2498,8 @@ mod tests {
             .add_documents_using_wtxn(
                 &mut wtxn,
                 documents!([
-                    { "name": "ยี่ปุ่น" },
-                    { "name": "ญี่ปุ่น" },
+                    { "id": 0, "name": "ยี่ปุ่น" },
+                    { "id": 1, "name": "ญี่ปุ่น" },
                 ]),
             )
             .unwrap();
@@ -2500,8 +2578,7 @@ mod tests {
 
     #[test]
     fn setting_primary_key() {
-        let mut index = TempIndex::new();
-        index.index_documents_config.autogenerate_docids = true;
+        let index = TempIndex::new();
 
         let mut wtxn = index.write_txn().unwrap();
         // Set the primary key settings
@@ -2510,6 +2587,8 @@ mod tests {
                 settings.set_primary_key(S("mykey"));
             })
             .unwrap();
+        wtxn.commit().unwrap();
+        let mut wtxn = index.write_txn().unwrap();
         assert_eq!(index.primary_key(&wtxn).unwrap(), Some("mykey"));
 
         // Then index some documents with the "mykey" primary key.
@@ -2565,8 +2644,7 @@ mod tests {
 
     #[test]
     fn setting_impact_relevancy() {
-        let mut index = TempIndex::new();
-        index.index_documents_config.autogenerate_docids = true;
+        let index = TempIndex::new();
 
         // Set the genres setting
         index
@@ -2717,6 +2795,8 @@ mod tests {
                     embedder_settings,
                     search_cutoff,
                     localized_attributes_rules,
+                    prefix_search,
+                    facet_search,
                 } = settings;
                 assert!(matches!(searchable_fields, Setting::NotSet));
                 assert!(matches!(displayed_fields, Setting::NotSet));
@@ -2742,6 +2822,8 @@ mod tests {
                 assert!(matches!(embedder_settings, Setting::NotSet));
                 assert!(matches!(search_cutoff, Setting::NotSet));
                 assert!(matches!(localized_attributes_rules, Setting::NotSet));
+                assert!(matches!(prefix_search, Setting::NotSet));
+                assert!(matches!(facet_search, Setting::NotSet));
             })
             .unwrap();
     }
